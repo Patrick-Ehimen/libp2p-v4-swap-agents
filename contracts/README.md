@@ -1,66 +1,75 @@
-## Foundry
+# Contracts
 
-**Foundry is a blazing fast, portable and modular toolkit for Ethereum application development written in Rust.**
+Uniswap V4 hook contracts for the libp2p swap agents project.
 
-Foundry consists of:
+## AgentCounter Hook
 
-- **Forge**: Ethereum testing framework (like Truffle, Hardhat and DappTools).
-- **Cast**: Swiss army knife for interacting with EVM smart contracts, sending transactions and getting chain data.
-- **Anvil**: Local Ethereum node, akin to Ganache, Hardhat Network.
-- **Chisel**: Fast, utilitarian, and verbose solidity REPL.
+A Uniswap V4 hook that tracks swap counts per agent address, enabling off-chain coordination between libp2p agents.
 
-## Documentation
+### Features
 
-https://book.getfoundry.sh/
+- **Swap Counting** - Tracks total swaps and per-agent swaps for each pool
+- **Event Emission** - Emits `AgentSwap` events for off-chain indexing
+- **View Functions** - Query swap counts by pool or agent
 
-## Usage
+### Hook Permissions
+
+| Hook | Enabled |
+|------|---------|
+| beforeSwap | Yes |
+| afterSwap | Yes |
+| beforeAddLiquidity | No |
+| afterAddLiquidity | No |
+
+### Contract Interface
+
+```solidity
+// State
+mapping(PoolId => uint256) public beforeSwapCount;
+mapping(PoolId => uint256) public afterSwapCount;
+mapping(PoolId => mapping(address => uint256)) public agentSwapCount;
+
+// Events
+event AgentSwap(PoolId indexed poolId, address indexed agent, uint256 agentTotal, uint256 poolTotal);
+
+// View Functions
+function getAgentSwapCount(PoolKey calldata key, address agent) external view returns (uint256);
+function getPoolSwapCount(PoolKey calldata key) external view returns (uint256);
+```
+
+## Development
 
 ### Build
 
-```shell
-$ forge build
+```bash
+forge build
 ```
 
 ### Test
 
-```shell
-$ forge test
+```bash
+forge test
 ```
 
-### Format
+### Test with Verbosity
 
-```shell
-$ forge fmt
+```bash
+forge test -vvv
 ```
 
-### Gas Snapshots
+## Dependencies
 
-```shell
-$ forge snapshot
-```
+- [v4-core](https://github.com/Uniswap/v4-core) - Uniswap V4 core contracts
+- [v4-periphery](https://github.com/Uniswap/v4-periphery) - Uniswap V4 periphery
+- [uniswap-hooks](https://github.com/openzeppelin/uniswap-hooks) - OpenZeppelin hook utilities
+- [hookmate](https://github.com/akshatmittal/hookmate) - Hook testing utilities
+- [forge-std](https://github.com/foundry-rs/forge-std) - Foundry standard library
 
-### Anvil
+## Deployment
 
-```shell
-$ anvil
-```
+Deployment scripts will be added in PR 2.
 
-### Deploy
-
-```shell
-$ forge script script/Counter.s.sol:CounterScript --rpc-url <your_rpc_url> --private-key <your_private_key>
-```
-
-### Cast
-
-```shell
-$ cast <subcommand>
-```
-
-### Help
-
-```shell
-$ forge --help
-$ anvil --help
-$ cast --help
+```bash
+# Coming soon
+forge script script/Deploy.s.sol --rpc-url $SEPOLIA_RPC_URL --private-key $PRIVATE_KEY --broadcast
 ```
