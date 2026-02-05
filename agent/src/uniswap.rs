@@ -63,7 +63,7 @@ impl SwapClient {
         }
     }
 
-    fn pool_key() -> PoolKey {
+    pub(crate) fn pool_key() -> PoolKey {
         PoolKey {
             currency0: TKNA,
             currency1: TKNB,
