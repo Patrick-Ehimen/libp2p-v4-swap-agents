@@ -133,6 +133,12 @@ cd agent && cargo run -- /ip4/127.0.0.1/tcp/<PORT>
 
 A full end-to-end walkthrough: two agents discover each other, chat, execute an on-chain swap, and verify hook counters.
 
+**[Watch the Demo Video](https://www.loom.com/share/a16339b479ee4e47861cb0d34783ed31)**
+
+| Peer 1 | Peer 2 |
+|--------|--------|
+| ![Peer 1](peer1.png) | ![Peer 2](peer2.png) |
+
 ### Prerequisites
 
 - Rust installed ([rustup.rs](https://rustup.rs/))
@@ -299,7 +305,7 @@ cp .env.example .env
 - [x] Deployed to Sepolia with TxID verification
 - [x] Rust libp2p agent (P2P chat + swap execution)
 - [x] Integration demo
-- [ ] Screencast (2-4 min walkthrough)
+- [x] Screencast (2-4 min walkthrough)
 
 ## License
 
