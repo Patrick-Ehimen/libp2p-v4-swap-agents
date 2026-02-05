@@ -45,8 +45,12 @@ libp2p-v4-swap-agents/
 │   │   └── 02_Swap.s.sol
 │   └── test/
 │       └── AgentCounter.t.sol
-├── agent/                  # Rust libp2p agent (coming soon)
+├── agent/                  # Rust libp2p agent
+│   ├── Cargo.toml
 │   └── src/
+│       ├── main.rs          # Event loop, CLI commands
+│       ├── network.rs       # gossipsub + mDNS behaviour
+│       └── uniswap.rs       # On-chain swap client (Alloy)
 └── README.md
 ```
 
@@ -99,12 +103,37 @@ A Uniswap V4 hook that tracks swap activity per agent address:
 | Approve TKNA for Router | [`0xe78da1eb763b532c5ec3b37437295b02a725f813029bd484e055d0d47f6bbebd`](https://sepolia.etherscan.io/tx/0xe78da1eb763b532c5ec3b37437295b02a725f813029bd484e055d0d47f6bbebd) |
 | Swap (1 TKNA → TKNB) | [`0xd2dfe24e6cf057317e720ed223d3d80cf0b37b9aef1ec27cd4100fc6d57af15e`](https://sepolia.etherscan.io/tx/0xd2dfe24e6cf057317e720ed223d3d80cf0b37b9aef1ec27cd4100fc6d57af15e) |
 
+## Agent
+
+The Rust agent uses libp2p for P2P communication and Alloy for on-chain interaction. See [`agent/README.md`](agent/README.md) for full details.
+
+### Quick Start
+
+```bash
+# Terminal 1
+cd agent && cargo run
+
+# Terminal 2 (use the TCP port from Terminal 1's output)
+cd agent && cargo run -- /ip4/127.0.0.1/tcp/<PORT>
+```
+
+### Commands
+
+| Command | Description |
+|---------|-------------|
+| `swap <amount>` | Swap TKNA -> TKNB on-chain |
+| `swap-b <amount>` | Swap TKNB -> TKNA on-chain |
+| `status` | Query on-chain hook swap counts |
+| `dial <multiaddr>` | Connect to a peer manually |
+| `help` | Show available commands |
+| `<text>` | Send chat message to peers |
+
 ## Development
 
 ### Prerequisites
 
 - [Foundry](https://book.getfoundry.sh/getting-started/installation)
-- [Rust](https://rustup.rs/) (for agent)
+- [Rust](https://rustup.rs/)
 
 ### Build & Test Contracts
 
@@ -112,6 +141,14 @@ A Uniswap V4 hook that tracks swap activity per agent address:
 cd contracts
 forge build
 forge test
+```
+
+### Build & Run Agent
+
+```bash
+cd agent
+cargo build
+cargo run
 ```
 
 ### Deployment Workflow
@@ -146,7 +183,7 @@ cp .env.example .env
 - [x] Contract tests (4 passing)
 - [x] Deployment scripts
 - [x] Deployed to Sepolia with TxID verification
-- [ ] Rust libp2p agent
+- [x] Rust libp2p agent (P2P chat + swap execution)
 - [ ] Integration demo
 
 ## License
