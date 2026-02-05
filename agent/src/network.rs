@@ -69,7 +69,7 @@ pub fn build_swarm() -> Result<Swarm<AgentBehaviour>> {
 
             Ok(AgentBehaviour { gossipsub, mdns })
         })?
-        .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))
+        .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(600)))
         .build();
 
     Ok(swarm)
