@@ -1,6 +1,9 @@
 mod network;
 mod uniswap;
 
+#[cfg(test)]
+mod tests;
+
 use std::env;
 
 use alloy::primitives::U256;
