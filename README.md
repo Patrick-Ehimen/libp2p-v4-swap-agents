@@ -50,7 +50,8 @@ libp2p-v4-swap-agents/
 │   └── src/
 │       ├── main.rs          # Event loop, CLI commands
 │       ├── network.rs       # gossipsub + mDNS behaviour
-│       └── uniswap.rs       # On-chain swap client (Alloy)
+│       ├── uniswap.rs       # On-chain swap client (Alloy)
+│       └── tests/           # Unit tests
 └── README.md
 ```
 
@@ -128,6 +129,119 @@ cd agent && cargo run -- /ip4/127.0.0.1/tcp/<PORT>
 | `help` | Show available commands |
 | `<text>` | Send chat message to peers |
 
+## Integration Demo
+
+A full end-to-end walkthrough: two agents discover each other, chat, execute an on-chain swap, and verify hook counters.
+
+### Prerequisites
+
+- Rust installed ([rustup.rs](https://rustup.rs/))
+- `.env` in the project root with `SEPOLIA_RPC_URL` and `PRIVATE_KEY` (see `.env.example`)
+- Wallet funded with Sepolia ETH and TKNA/TKNB tokens
+
+### Step 1 — Start Agent A
+
+```bash
+cd agent && cargo run
+```
+
+```
+=== libp2p Uniswap V4 Swap Agent ===
+Peer ID: 12D3KooWExamplePeerIdA...
+Topic: v4-swap-agents
+Type 'help' for available commands.
+
+Listening on /ip4/127.0.0.1/tcp/54321
+Listening on /ip4/127.0.0.1/udp/54322/quic-v1
+```
+
+### Step 2 — Start Agent B (new terminal)
+
+Use the TCP address from Agent A's output:
+
+```bash
+cd agent && cargo run -- /ip4/127.0.0.1/tcp/54321
+```
+
+Both terminals will show discovery and connection:
+
+```
+# Agent B
+Dialing /ip4/127.0.0.1/tcp/54321...
+mDNS discovered peer: 12D3KooWExamplePeerIdA...
+Connected to peer: 12D3KooWExamplePeerIdA...
+
+# Agent A
+mDNS discovered peer: 12D3KooWExamplePeerIdB...
+Connected to peer: 12D3KooWExamplePeerIdB...
+```
+
+### Step 3 — Chat
+
+Type a message in either terminal — it appears in the other:
+
+```
+# Agent A types:
+hello from agent A
+
+# Agent B sees:
+[12D3KooWExamplePeerIdA...] hello from agent A
+```
+
+### Step 4 — Execute a swap
+
+In Agent A's terminal:
+
+```
+swap 1
+```
+
+Agent A output:
+
+```
+Executing swap: 1 TKNA -> TKNB...
+  Approved token: tx 0xabc...
+  https://sepolia.etherscan.io/tx/0xabc...
+  Swap executed: tx 0xdef...
+Swap complete! tx: 0xdef...
+  https://sepolia.etherscan.io/tx/0xdef...
+```
+
+Agent B receives the broadcast:
+
+```
+[SWAP] Agent 12D3KooW... swapped 1 (TKNA -> TKNB) tx: 0xdef...
+  https://sepolia.etherscan.io/tx/0xdef...
+```
+
+### Step 5 — Query on-chain status
+
+```
+status
+```
+
+```
+Pool total swaps: 3 | Your agent swaps: 1
+```
+
+### Step 6 — Verify on-chain (optional)
+
+Use `cast` to query the hook directly:
+
+```bash
+# Get the pool ID (keccak of the pool key)
+POOL_ID=$(cast keccak 0x$(cast abi-encode "f(address,address,uint24,int24,address)" \
+  0x7546360e0011Bb0B52ce10E21eF0E9341453fE71 \
+  0xF6d91478e66CE8161e15Da103003F3BA6d2bab80 \
+  3000 60 \
+  0x5D4505AA950a73379B8E9f1116976783Ba8340C0))
+
+# Query afterSwapCount
+cast call 0x5D4505AA950a73379B8E9f1116976783Ba8340C0 \
+  "afterSwapCount(bytes32)(uint256)" $POOL_ID \
+  --rpc-url $SEPOLIA_RPC_URL
+```
+
 ## Development
 
 ### Prerequisites
@@ -184,7 +298,8 @@ cp .env.example .env
 - [x] Deployment scripts
 - [x] Deployed to Sepolia with TxID verification
 - [x] Rust libp2p agent (P2P chat + swap execution)
-- [ ] Integration demo
+- [x] Integration demo
+- [ ] Screencast (2-4 min walkthrough)
 
 ## License
 
