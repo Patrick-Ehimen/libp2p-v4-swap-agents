@@ -11,11 +11,11 @@ contract DeployWithSaltV2Script is Script {
     // Sepolia PoolManager
     IPoolManager constant POOL_MANAGER = IPoolManager(0xE03A1074c86CFeDd5C142C4F04F1a1536e203543);
 
-    // Pre-computed salt from MineSaltV2.s.sol (UPDATE AFTER MINING)
-    bytes32 constant SALT = bytes32(uint256(0)); // TODO: update after running MineSaltV2
+    // Pre-computed salt from MineSaltV2.s.sol
+    bytes32 constant SALT = bytes32(uint256(7145));
 
-    // Expected hook address (UPDATE AFTER MINING)
-    address constant EXPECTED_HOOK = address(0); // TODO: update after running MineSaltV2
+    // Expected hook address
+    address constant EXPECTED_HOOK = 0xA8760B755c67c5C75A8A60ED7E3713eA2448D0C0;
 
     function run() public {
         console.log("Deploying AgentCounterV2 hook to Sepolia...");

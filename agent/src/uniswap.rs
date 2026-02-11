@@ -14,8 +14,8 @@ pub const SWAP_ROUTER: Address =
     Address::new(hex!("f13D190e9117920c703d79B5F33732e10049b115"));
 pub const HOOK: Address = Address::new(hex!("5D4505AA950a73379B8E9f1116976783Ba8340C0"));
 
-// V2 hook (dynamic fees + hookData agent tracking) — UPDATE AFTER DEPLOYMENT
-pub const HOOK_V2: Address = Address::ZERO; // TODO: update after deploying AgentCounterV2
+// V2 hook (dynamic fees + hookData agent tracking)
+pub const HOOK_V2: Address = Address::new(hex!("A8760B755c67c5C75A8A60ED7E3713eA2448D0C0"));
 
 /// Dynamic fee flag used by Uniswap V4 for pools with hook-controlled fees
 pub const DYNAMIC_FEE_FLAG: u32 = 0x800000;

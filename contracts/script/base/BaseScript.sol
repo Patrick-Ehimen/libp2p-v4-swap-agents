@@ -26,8 +26,8 @@ contract BaseScript is Script, Deployers {
     IERC20 internal constant token1 = IERC20(0xF6d91478e66CE8161e15Da103003F3BA6d2bab80);
     IHooks constant hookContract = IHooks(0x5D4505AA950a73379B8E9f1116976783Ba8340C0);
 
-    // V2 hook (dynamic fees + hookData agent tracking) — UPDATE AFTER DEPLOYMENT
-    IHooks constant hookContractV2 = IHooks(address(0)); // TODO: update after deploying AgentCounterV2
+    // V2 hook (dynamic fees + hookData agent tracking)
+    IHooks constant hookContractV2 = IHooks(0xA8760B755c67c5C75A8A60ED7E3713eA2448D0C0);
     /////////////////////////////////////
 
     Currency immutable currency0;
