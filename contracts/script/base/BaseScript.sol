@@ -25,6 +25,9 @@ contract BaseScript is Script, Deployers {
     IERC20 internal constant token0 = IERC20(0x7546360e0011Bb0B52ce10E21eF0E9341453fE71);
     IERC20 internal constant token1 = IERC20(0xF6d91478e66CE8161e15Da103003F3BA6d2bab80);
     IHooks constant hookContract = IHooks(0x5D4505AA950a73379B8E9f1116976783Ba8340C0);
+
+    // V2 hook (dynamic fees + hookData agent tracking) — UPDATE AFTER DEPLOYMENT
+    IHooks constant hookContractV2 = IHooks(address(0)); // TODO: update after deploying AgentCounterV2
     /////////////////////////////////////
 
     Currency immutable currency0;
@@ -47,6 +50,7 @@ contract BaseScript is Script, Deployers {
         vm.label(address(token1), "Currency1");
 
         vm.label(address(hookContract), "HookContract");
+        vm.label(address(hookContractV2), "HookContractV2");
     }
 
     function _etch(address target, bytes memory bytecode) internal override {

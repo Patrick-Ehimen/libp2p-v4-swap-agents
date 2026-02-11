@@ -86,12 +86,15 @@ async fn handle_input(
     match parts[0] {
         "help" => {
             println!("Commands:");
-            println!("  dial <multiaddr> - Connect to a peer (e.g. /ip4/127.0.0.1/tcp/PORT)");
-            println!("  swap <amount>    - Swap TKNA -> TKNB");
-            println!("  swap-b <amount>  - Swap TKNB -> TKNA");
-            println!("  status           - Query on-chain swap counts");
-            println!("  help             - Show this message");
-            println!("  <text>           - Send chat message to peers");
+            println!("  dial <multiaddr>    - Connect to a peer");
+            println!("  swap <amount>       - Swap TKNA -> TKNB (V1 pool)");
+            println!("  swap-b <amount>     - Swap TKNB -> TKNA (V1 pool)");
+            println!("  swap-v2 <amount>    - Swap TKNA -> TKNB (V2 pool, fee rebates)");
+            println!("  swap-v2-b <amount>  - Swap TKNB -> TKNA (V2 pool, fee rebates)");
+            println!("  status              - Query V1 on-chain swap counts");
+            println!("  status-v2           - Query V2 swap counts + your fee tier");
+            println!("  help                - Show this message");
+            println!("  <text>              - Send chat message to peers");
         }
         "dial" => {
             if let Some(addr) = parts.get(1) {
@@ -109,16 +112,22 @@ async fn handle_input(
                 println!("  Example: dial /ip4/127.0.0.1/tcp/52178");
             }
         }
-        "swap" | "swap-b" => {
-            let zero_for_one = parts[0] == "swap";
+        // V1 swaps (swap/swap-b) use the original pool with empty hookData.
+        // V2 swaps (swap-v2/swap-v2-b) use the dynamic-fee pool and encode the
+        // agent's EOA in hookData so the hook tracks the real agent and applies
+        // fee rebates after REBATE_THRESHOLD swaps.
+        "swap" | "swap-b" | "swap-v2" | "swap-v2-b" => {
+            let is_v2 = parts[0].starts_with("swap-v2") || parts[0] == "swap-v2";
+            let zero_for_one = parts[0] == "swap" || parts[0] == "swap-v2";
             let amount_str = parts.get(1).unwrap_or(&"1");
             let direction = if zero_for_one {
                 "TKNA -> TKNB"
             } else {
                 "TKNB -> TKNA"
             };
+            let version = if is_v2 { "V2" } else { "V1" };
 
-            println!("Executing swap: {amount_str} {direction}...");
+            println!("Executing {version} swap: {amount_str} {direction}...");
 
             let amount = match amount_str.parse::<u64>() {
                 Ok(a) => U256::from(a) * U256::from(10u64.pow(18)),
@@ -128,7 +137,13 @@ async fn handle_input(
                 }
             };
 
-            match swap_client.execute_swap(amount, zero_for_one).await {
+            let result = if is_v2 {
+                swap_client.execute_swap_v2(amount, zero_for_one).await
+            } else {
+                swap_client.execute_swap(amount, zero_for_one).await
+            };
+
+            match result {
                 Ok(tx_hash) => {
                     let msg = AgentMessage::SwapExecuted {
                         agent: swarm.local_peer_id().to_string(),
@@ -146,6 +161,11 @@ async fn handle_input(
         "status" => match swap_client.get_swap_counts().await {
             Ok(counts) => println!("{counts}"),
             Err(e) => println!("Failed to query counts: {e}"),
+        },
+        // Query V2 hook: shows swap counts plus the agent's current fee tier
+        "status-v2" => match swap_client.get_swap_counts_v2().await {
+            Ok(counts) => println!("{counts}"),
+            Err(e) => println!("Failed to query V2 counts: {e}"),
         },
         _ => {
             let msg = AgentMessage::Chat {

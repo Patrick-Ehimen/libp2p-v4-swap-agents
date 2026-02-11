@@ -1,6 +1,6 @@
-use alloy::primitives::{address, Signed, Uint};
+use alloy::primitives::{address, Address, Signed, Uint};
 
-use crate::uniswap::{SwapClient, HOOK, SWAP_ROUTER, TKNA, TKNB};
+use crate::uniswap::{SwapClient, DYNAMIC_FEE_FLAG, HOOK, HOOK_V2, SWAP_ROUTER, TKNA, TKNB};
 
 #[test]
 fn contract_address_tkna() {
@@ -57,4 +57,38 @@ fn pool_key_token_ordering() {
 fn pool_key_hook_address() {
     let key = SwapClient::pool_key();
     assert_eq!(key.hooks, HOOK);
+}
+
+// --- V2 pool key tests ---
+
+#[test]
+fn pool_key_v2_dynamic_fee() {
+    let key = SwapClient::pool_key_v2();
+    assert_eq!(key.fee, Uint::<24, 1>::from(DYNAMIC_FEE_FLAG));
+}
+
+#[test]
+fn pool_key_v2_tick_spacing() {
+    let key = SwapClient::pool_key_v2();
+    assert_eq!(key.tickSpacing, Signed::<24, 1>::try_from(60).unwrap());
+}
+
+#[test]
+fn pool_key_v2_hook_address() {
+    let key = SwapClient::pool_key_v2();
+    assert_eq!(key.hooks, HOOK_V2);
+}
+
+#[test]
+fn pool_key_v2_same_tokens() {
+    let v1 = SwapClient::pool_key();
+    let v2 = SwapClient::pool_key_v2();
+    assert_eq!(v1.currency0, v2.currency0);
+    assert_eq!(v1.currency1, v2.currency1);
+}
+
+#[test]
+fn hook_v2_is_placeholder() {
+    // Will be updated after deployment — verify it's currently the zero address placeholder
+    assert_eq!(HOOK_V2, Address::ZERO);
 }
