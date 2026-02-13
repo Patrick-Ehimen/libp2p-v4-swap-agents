@@ -51,6 +51,7 @@ libp2p-v4-swap-agents/
 │       ├── main.rs          # Event loop, CLI commands
 │       ├── network.rs       # gossipsub + mDNS behaviour
 │       ├── uniswap.rs       # On-chain swap client (Alloy)
+│       ├── identity.rs      # PeerId <-> EOA identity binding (EIP-191)
 │       └── tests/           # Unit tests
 └── README.md
 ```
@@ -72,6 +73,15 @@ An upgraded hook that fixes V1's agent tracking bug and adds dynamic fee rebates
 - **hookData agent tracking** - Decodes the real agent EOA from hookData (V1 incorrectly tracked the router address)
 - **Dynamic fee rebates** - Frequent agents (5+ swaps) pay 0.20% instead of the 0.30% base fee
 - **DYNAMIC_FEE_FLAG pool** - Uses Uniswap V4's fee override mechanism via `_beforeSwap`
+
+### PeerId <-> EOA Identity Binding
+
+Agents cryptographically prove they control an Ethereum address by signing their libp2p PeerId with their ETH private key (EIP-191). On peer connection, the signed attestation is broadcast over gossipsub. Receiving peers verify the signature, linking the P2P identity to an on-chain address.
+
+- **EIP-191 signing** - Signs `"libp2p-v4-swap-agents:identity:{peer_id}"` with the agent's Ethereum key
+- **Automatic exchange** - Attestation is published on every new peer connection
+- **Signature verification** - Peers recover the signer address and reject mismatches
+- **Peer registry** - Stores all verified PeerId -> EOA bindings locally
 
 ## Deployed Contracts (Sepolia)
 
@@ -137,6 +147,8 @@ cd agent && cargo run -- /ip4/127.0.0.1/tcp/<PORT>
 | `swap-v2-b <amount>` | Swap TKNB -> TKNA (V2 pool, fee rebates) |
 | `status` | Query V1 on-chain swap counts |
 | `status-v2` | Query V2 swap counts + your fee tier |
+| `who` | Show your PeerId and linked EOA |
+| `peers` | List all verified peer identities |
 | `dial <multiaddr>` | Connect to a peer manually |
 | `help` | Show available commands |
 | `<text>` | Send chat message to peers |
@@ -166,7 +178,8 @@ cd agent && cargo run
 ```
 === libp2p Uniswap V4 Swap Agent ===
 Peer ID: 12D3KooWExamplePeerIdA...
-Topic: v4-swap-agents
+EOA:     0x817cA93300590bF6AA0DFbFa592b055F7eb20090
+Topic:   v4-swap-agents
 Type 'help' for available commands.
 
 Listening on /ip4/127.0.0.1/tcp/54321
@@ -181,17 +194,19 @@ Use the TCP address from Agent A's output:
 cd agent && cargo run -- /ip4/127.0.0.1/tcp/54321
 ```
 
-Both terminals will show discovery and connection:
+Both terminals will show discovery, connection, and identity verification:
 
 ```
 # Agent B
 Dialing /ip4/127.0.0.1/tcp/54321...
 mDNS discovered peer: 12D3KooWExamplePeerIdA...
 Connected to peer: 12D3KooWExamplePeerIdA...
+[IDENTITY] Verified: 12D3KooWExamplePeerIdA... -> 0x817c...
 
 # Agent A
 mDNS discovered peer: 12D3KooWExamplePeerIdB...
 Connected to peer: 12D3KooWExamplePeerIdB...
+[IDENTITY] Verified: 12D3KooWExamplePeerIdB... -> 0xf39F...
 ```
 
 ### Step 3 — Chat
@@ -319,7 +334,7 @@ cp .env.example .env
 - [x] Integration demo
 - [x] Screencast (2-4 min walkthrough)
 - [x] AgentCounterV2 — dynamic fee rebates + hookData agent tracking (6 tests)
-- [ ] PeerId <-> EOA identity binding
+- [x] PeerId <-> EOA identity binding (EIP-191 attestation, 6 tests)
 - [ ] Swap intent gossip
 
 ## License

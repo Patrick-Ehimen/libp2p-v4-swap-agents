@@ -1,4 +1,4 @@
-use alloy::primitives::{address, Address, Signed, Uint};
+use alloy::primitives::{address, Signed, Uint};
 
 use crate::uniswap::{SwapClient, DYNAMIC_FEE_FLAG, HOOK, HOOK_V2, SWAP_ROUTER, TKNA, TKNB};
 

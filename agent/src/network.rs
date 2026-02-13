@@ -31,6 +31,12 @@ pub enum AgentMessage {
         direction: String,
         amount: String,
     },
+    /// PeerId <-> EOA identity attestation (EIP-191 signed proof of Ethereum address ownership)
+    IdentityAttestation {
+        peer_id: String,
+        eoa: String,
+        signature: String,
+    },
 }
 
 pub fn build_swarm() -> Result<Swarm<AgentBehaviour>> {
