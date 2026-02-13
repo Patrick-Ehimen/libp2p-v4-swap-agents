@@ -1,3 +1,4 @@
+mod identity;
 mod network;
 mod uniswap;
 
@@ -6,7 +7,7 @@ mod tests;
 
 use std::env;
 
-use alloy::primitives::U256;
+use alloy::primitives::{Address, U256};
 use anyhow::Result;
 use futures::StreamExt;
 use libp2p::swarm::SwarmEvent;
@@ -14,6 +15,7 @@ use libp2p::{gossipsub, mdns, Multiaddr};
 use tokio::io::{self, AsyncBufReadExt};
 use tracing_subscriber::EnvFilter;
 
+use identity::{IdentityBinding, PeerRegistry};
 use network::{AgentBehaviourEvent, AgentMessage, TOPIC};
 use uniswap::SwapClient;
 
@@ -28,7 +30,7 @@ async fn main() -> Result<()> {
     let rpc_url = env::var("SEPOLIA_RPC_URL").expect("SEPOLIA_RPC_URL must be set");
     let private_key = env::var("PRIVATE_KEY").expect("PRIVATE_KEY must be set");
 
-    let swap_client = SwapClient::new(rpc_url, private_key);
+    let swap_client = SwapClient::new(rpc_url, private_key.clone());
 
     let mut swarm = network::build_swarm()?;
 
@@ -39,10 +41,25 @@ async fn main() -> Result<()> {
     swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse::<Multiaddr>()?)?;
     swarm.listen_on("/ip4/0.0.0.0/udp/0/quic-v1".parse::<Multiaddr>()?)?;
 
+    // Create identity attestation: sign PeerId with Ethereum private key
+    let peer_id_str = swarm.local_peer_id().to_string();
+    let own_binding = IdentityBinding::create(&private_key, &peer_id_str).await?;
+
     println!("=== libp2p Uniswap V4 Swap Agent ===");
-    println!("Peer ID: {}", swarm.local_peer_id());
-    println!("Topic: {TOPIC}");
+    println!("Peer ID: {}", peer_id_str);
+    println!("EOA:     {}", own_binding.eoa);
+    println!("Topic:   {TOPIC}");
     println!("Type 'help' for available commands.\n");
+
+    // Pre-build the attestation message to publish on each new connection
+    let attestation_msg = AgentMessage::IdentityAttestation {
+        peer_id: own_binding.peer_id.clone(),
+        eoa: format!("{}", own_binding.eoa),
+        signature: own_binding.signature.clone(),
+    };
+
+    let mut peer_registry = PeerRegistry::new();
+    peer_registry.register(own_binding);
 
     // Dial a remote peer if provided as CLI argument
     if let Some(addr) = env::args().nth(1) {
@@ -61,11 +78,11 @@ async fn main() -> Result<()> {
         tokio::select! {
             line = stdin.next_line() => {
                 if let Ok(Some(line)) = line {
-                    handle_input(&line, &topic, &mut swarm, &swap_client).await;
+                    handle_input(&line, &topic, &mut swarm, &swap_client, &peer_registry).await;
                 }
             }
             event = swarm.select_next_some() => {
-                handle_swarm_event(event, &mut swarm);
+                handle_swarm_event(event, &mut swarm, &topic, &attestation_msg, &mut peer_registry);
             }
         }
     }
@@ -76,6 +93,7 @@ async fn handle_input(
     topic: &gossipsub::IdentTopic,
     swarm: &mut libp2p::Swarm<network::AgentBehaviour>,
     swap_client: &SwapClient,
+    peer_registry: &PeerRegistry,
 ) {
     let trimmed = line.trim();
     if trimmed.is_empty() {
@@ -93,6 +111,8 @@ async fn handle_input(
             println!("  swap-v2-b <amount>  - Swap TKNB -> TKNA (V2 pool, fee rebates)");
             println!("  status              - Query V1 on-chain swap counts");
             println!("  status-v2           - Query V2 swap counts + your fee tier");
+            println!("  who                 - Show your PeerId and EOA");
+            println!("  peers               - List all verified peer identities");
             println!("  help                - Show this message");
             println!("  <text>              - Send chat message to peers");
         }
@@ -167,6 +187,26 @@ async fn handle_input(
             Ok(counts) => println!("{counts}"),
             Err(e) => println!("Failed to query V2 counts: {e}"),
         },
+        // Show own PeerId <-> EOA identity binding
+        "who" => {
+            let my_peer_id = swarm.local_peer_id().to_string();
+            if let Some(binding) = peer_registry.get(&my_peer_id) {
+                println!("PeerId: {}", binding.peer_id);
+                println!("EOA:    {}", binding.eoa);
+            }
+        }
+        // List all verified peer identity bindings
+        "peers" => {
+            let bindings = peer_registry.all();
+            if bindings.is_empty() {
+                println!("No verified peers.");
+            } else {
+                println!("Verified peers ({}):", bindings.len());
+                for binding in bindings.values() {
+                    println!("  {} -> {}", binding.peer_id, binding.eoa);
+                }
+            }
+        }
         _ => {
             let msg = AgentMessage::Chat {
                 content: trimmed.to_string(),
@@ -200,6 +240,9 @@ fn publish_message(
 fn handle_swarm_event(
     event: SwarmEvent<AgentBehaviourEvent>,
     swarm: &mut libp2p::Swarm<network::AgentBehaviour>,
+    topic: &gossipsub::IdentTopic,
+    attestation_msg: &AgentMessage,
+    peer_registry: &mut PeerRegistry,
 ) {
     match event {
         SwarmEvent::Behaviour(AgentBehaviourEvent::Mdns(mdns::Event::Discovered(list))) => {
@@ -248,6 +291,46 @@ fn handle_swarm_event(
                             "[REQUEST] Peer {peer_id} requests swap: {amount} ({direction})"
                         );
                     }
+                    // Verify incoming identity attestation and register if valid
+                    AgentMessage::IdentityAttestation {
+                        peer_id: attested_peer_id,
+                        eoa,
+                        signature,
+                    } => {
+                        let eoa_addr: Address = match eoa.parse() {
+                            Ok(a) => a,
+                            Err(_) => {
+                                println!("[IDENTITY] Invalid EOA from {peer_id}: {eoa}");
+                                return;
+                            }
+                        };
+                        let binding = IdentityBinding::from_parts(
+                            attested_peer_id.clone(),
+                            eoa_addr,
+                            signature,
+                        );
+                        match binding.verify() {
+                            Ok(true) => {
+                                println!(
+                                    "[IDENTITY] Verified: {} -> {}",
+                                    attested_peer_id, eoa_addr
+                                );
+                                peer_registry.register(binding);
+                            }
+                            Ok(false) => {
+                                println!(
+                                    "[IDENTITY] REJECTED (signature mismatch): {} claimed {}",
+                                    attested_peer_id, eoa_addr
+                                );
+                            }
+                            Err(e) => {
+                                println!(
+                                    "[IDENTITY] Verification error for {}: {e}",
+                                    attested_peer_id
+                                );
+                            }
+                        }
+                    }
                 }
             } else {
                 // Fallback: treat as plain text
@@ -264,6 +347,8 @@ fn handle_swarm_event(
                 .behaviour_mut()
                 .gossipsub
                 .add_explicit_peer(&peer_id);
+            // Publish our identity attestation so the new peer can verify our EOA
+            publish_message(swarm, topic, attestation_msg);
         }
         SwarmEvent::ConnectionClosed { peer_id, .. } => {
             println!("Disconnected from peer: {peer_id}");
