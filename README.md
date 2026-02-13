@@ -57,7 +57,7 @@ libp2p-v4-swap-agents/
 
 ## Contracts
 
-### AgentCounter Hook
+### AgentCounter Hook (V1)
 
 A Uniswap V4 hook that tracks swap activity per agent address:
 
@@ -65,11 +65,20 @@ A Uniswap V4 hook that tracks swap activity per agent address:
 - **agentSwapCount** - Tracks swaps per agent address
 - **AgentSwap event** - Emitted for off-chain tracking by libp2p agents
 
+### AgentCounterV2 Hook
+
+An upgraded hook that fixes V1's agent tracking bug and adds dynamic fee rebates:
+
+- **hookData agent tracking** - Decodes the real agent EOA from hookData (V1 incorrectly tracked the router address)
+- **Dynamic fee rebates** - Frequent agents (5+ swaps) pay 0.20% instead of the 0.30% base fee
+- **DYNAMIC_FEE_FLAG pool** - Uses Uniswap V4's fee override mechanism via `_beforeSwap`
+
 ## Deployed Contracts (Sepolia)
 
 | Contract | Address |
 |----------|---------|
-| AgentCounter Hook | [`0x5D4505AA950a73379B8E9f1116976783Ba8340C0`](https://sepolia.etherscan.io/address/0x5D4505AA950a73379B8E9f1116976783Ba8340C0) |
+| AgentCounter Hook (V1) | [`0x5D4505AA950a73379B8E9f1116976783Ba8340C0`](https://sepolia.etherscan.io/address/0x5D4505AA950a73379B8E9f1116976783Ba8340C0) |
+| AgentCounterV2 Hook | [`0xA8760B755c67c5C75A8A60ED7E3713eA2448D0C0`](https://sepolia.etherscan.io/address/0xA8760B755c67c5C75A8A60ED7E3713eA2448D0C0) |
 | Token A (TKNA) | [`0x7546360e0011Bb0B52ce10E21eF0E9341453fE71`](https://sepolia.etherscan.io/address/0x7546360e0011Bb0B52ce10E21eF0E9341453fE71) |
 | Token B (TKNB) | [`0xF6d91478e66CE8161e15Da103003F3BA6d2bab80`](https://sepolia.etherscan.io/address/0xF6d91478e66CE8161e15Da103003F3BA6d2bab80) |
 
@@ -122,9 +131,12 @@ cd agent && cargo run -- /ip4/127.0.0.1/tcp/<PORT>
 
 | Command | Description |
 |---------|-------------|
-| `swap <amount>` | Swap TKNA -> TKNB on-chain |
-| `swap-b <amount>` | Swap TKNB -> TKNA on-chain |
-| `status` | Query on-chain hook swap counts |
+| `swap <amount>` | Swap TKNA -> TKNB (V1 pool) |
+| `swap-b <amount>` | Swap TKNB -> TKNA (V1 pool) |
+| `swap-v2 <amount>` | Swap TKNA -> TKNB (V2 pool, fee rebates) |
+| `swap-v2-b <amount>` | Swap TKNB -> TKNA (V2 pool, fee rebates) |
+| `status` | Query V1 on-chain swap counts |
+| `status-v2` | Query V2 swap counts + your fee tier |
 | `dial <multiaddr>` | Connect to a peer manually |
 | `help` | Show available commands |
 | `<text>` | Send chat message to peers |
@@ -299,13 +311,16 @@ cp .env.example .env
 
 ## Roadmap
 
-- [x] AgentCounter hook contract
+- [x] AgentCounter hook contract (V1)
 - [x] Contract tests (4 passing)
 - [x] Deployment scripts
 - [x] Deployed to Sepolia with TxID verification
 - [x] Rust libp2p agent (P2P chat + swap execution)
 - [x] Integration demo
 - [x] Screencast (2-4 min walkthrough)
+- [x] AgentCounterV2 — dynamic fee rebates + hookData agent tracking (6 tests)
+- [ ] PeerId <-> EOA identity binding
+- [ ] Swap intent gossip
 
 ## License
 
