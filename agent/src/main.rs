@@ -1,5 +1,7 @@
+mod cli;
 mod identity;
 mod network;
+mod sim;
 mod uniswap;
 
 #[cfg(test)]
@@ -9,14 +11,17 @@ use std::env;
 
 use alloy::primitives::{Address, U256};
 use anyhow::Result;
+use clap::Parser;
 use futures::StreamExt;
 use libp2p::swarm::SwarmEvent;
 use libp2p::{gossipsub, mdns, Multiaddr};
 use tokio::io::{self, AsyncBufReadExt};
 use tracing_subscriber::EnvFilter;
 
+use cli::Cli;
 use identity::{IdentityBinding, PeerRegistry};
 use network::{AgentBehaviourEvent, AgentMessage, TOPIC};
+use sim::SimulationMode;
 use uniswap::SwapClient;
 
 #[tokio::main]
@@ -27,8 +32,24 @@ async fn main() -> Result<()> {
 
     dotenvy::dotenv().ok();
 
-    let rpc_url = env::var("SEPOLIA_RPC_URL").expect("SEPOLIA_RPC_URL must be set");
-    let private_key = env::var("PRIVATE_KEY").expect("PRIVATE_KEY must be set");
+    let cli = Cli::parse();
+    let sim_mode = SimulationMode::new(cli.simulate);
+
+    // In simulation mode, env vars are optional — fall back to hardhat defaults
+    let (rpc_url, private_key) = if sim_mode.is_active() {
+        let rpc = env::var("SEPOLIA_RPC_URL")
+            .unwrap_or_else(|_| "http://localhost:8545".to_string());
+        let key = env::var("PRIVATE_KEY").unwrap_or_else(|_| {
+            "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80".to_string()
+        });
+        (rpc, key)
+    } else {
+        let rpc = env::var("SEPOLIA_RPC_URL")
+            .expect("SEPOLIA_RPC_URL must be set (use --simulate to skip)");
+        let key = env::var("PRIVATE_KEY")
+            .expect("PRIVATE_KEY must be set (use --simulate to skip)");
+        (rpc, key)
+    };
 
     let swap_client = SwapClient::new(rpc_url, private_key.clone());
 
@@ -45,7 +66,13 @@ async fn main() -> Result<()> {
     let peer_id_str = swarm.local_peer_id().to_string();
     let own_binding = IdentityBinding::create(&private_key, &peer_id_str).await?;
 
+    let mode_label = if sim_mode.is_active() {
+        "SIMULATION"
+    } else {
+        "LIVE (Sepolia)"
+    };
     println!("=== libp2p Uniswap V4 Swap Agent ===");
+    println!("Mode:    {mode_label}");
     println!("Peer ID: {}", peer_id_str);
     println!("EOA:     {}", own_binding.eoa);
     println!("Topic:   {TOPIC}");
@@ -62,7 +89,7 @@ async fn main() -> Result<()> {
     peer_registry.register(own_binding);
 
     // Dial a remote peer if provided as CLI argument
-    if let Some(addr) = env::args().nth(1) {
+    if let Some(addr) = cli.dial {
         match addr.parse::<Multiaddr>() {
             Ok(remote) => {
                 swarm.dial(remote.clone())?;
@@ -78,7 +105,7 @@ async fn main() -> Result<()> {
         tokio::select! {
             line = stdin.next_line() => {
                 if let Ok(Some(line)) = line {
-                    handle_input(&line, &topic, &mut swarm, &swap_client, &peer_registry).await;
+                    handle_input(&line, &topic, &mut swarm, &swap_client, &peer_registry, &sim_mode).await;
                 }
             }
             event = swarm.select_next_some() => {
@@ -94,6 +121,7 @@ async fn handle_input(
     swarm: &mut libp2p::Swarm<network::AgentBehaviour>,
     swap_client: &SwapClient,
     peer_registry: &PeerRegistry,
+    sim_mode: &SimulationMode,
 ) {
     let trimmed = line.trim();
     if trimmed.is_empty() {
@@ -111,6 +139,7 @@ async fn handle_input(
             println!("  swap-v2-b <amount>  - Swap TKNB -> TKNA (V2 pool, fee rebates)");
             println!("  status              - Query V1 on-chain swap counts");
             println!("  status-v2           - Query V2 swap counts + your fee tier");
+            println!("  sim on|off          - Toggle simulation mode at runtime");
             println!("  who                 - Show your PeerId and EOA");
             println!("  peers               - List all verified peer identities");
             println!("  help                - Show this message");
@@ -147,35 +176,50 @@ async fn handle_input(
             };
             let version = if is_v2 { "V2" } else { "V1" };
 
-            println!("Executing {version} swap: {amount_str} {direction}...");
+            if sim_mode.is_active() {
+                let peer_id_str = swarm.local_peer_id().to_string();
+                let tx_hash = sim::simulated_tx_hash(&peer_id_str);
+                println!("[SIM] {version} swap: {amount_str} {direction}");
+                println!("[SIM] tx: {tx_hash}");
 
-            let amount = match amount_str.parse::<u64>() {
-                Ok(a) => U256::from(a) * U256::from(10u64.pow(18)),
-                Err(_) => {
-                    println!("Invalid amount: {amount_str}");
-                    return;
-                }
-            };
-
-            let result = if is_v2 {
-                swap_client.execute_swap_v2(amount, zero_for_one).await
+                let msg = AgentMessage::SwapExecuted {
+                    agent: peer_id_str,
+                    direction: direction.to_string(),
+                    amount: amount_str.to_string(),
+                    tx_hash,
+                };
+                publish_message(swarm, topic, &msg);
             } else {
-                swap_client.execute_swap(amount, zero_for_one).await
-            };
+                println!("Executing {version} swap: {amount_str} {direction}...");
 
-            match result {
-                Ok(tx_hash) => {
-                    let msg = AgentMessage::SwapExecuted {
-                        agent: swarm.local_peer_id().to_string(),
-                        direction: direction.to_string(),
-                        amount: amount_str.to_string(),
-                        tx_hash: tx_hash.clone(),
-                    };
-                    publish_message(swarm, topic, &msg);
-                    println!("Swap complete! tx: {tx_hash}");
-                    println!("  https://sepolia.etherscan.io/tx/{tx_hash}");
+                let amount = match amount_str.parse::<u64>() {
+                    Ok(a) => U256::from(a) * U256::from(10u64.pow(18)),
+                    Err(_) => {
+                        println!("Invalid amount: {amount_str}");
+                        return;
+                    }
+                };
+
+                let result = if is_v2 {
+                    swap_client.execute_swap_v2(amount, zero_for_one).await
+                } else {
+                    swap_client.execute_swap(amount, zero_for_one).await
+                };
+
+                match result {
+                    Ok(tx_hash) => {
+                        let msg = AgentMessage::SwapExecuted {
+                            agent: swarm.local_peer_id().to_string(),
+                            direction: direction.to_string(),
+                            amount: amount_str.to_string(),
+                            tx_hash: tx_hash.clone(),
+                        };
+                        publish_message(swarm, topic, &msg);
+                        println!("Swap complete! tx: {tx_hash}");
+                        println!("  https://sepolia.etherscan.io/tx/{tx_hash}");
+                    }
+                    Err(e) => println!("Swap failed: {e}"),
                 }
-                Err(e) => println!("Swap failed: {e}"),
             }
         }
         "status" => match swap_client.get_swap_counts().await {
@@ -196,6 +240,24 @@ async fn handle_input(
             }
         }
         // List all verified peer identity bindings
+        "sim" => {
+            if let Some(arg) = parts.get(1) {
+                match *arg {
+                    "on" => {
+                        sim_mode.set(true);
+                        println!("Simulation mode: ON");
+                    }
+                    "off" => {
+                        sim_mode.set(false);
+                        println!("Simulation mode: OFF");
+                    }
+                    _ => println!("Usage: sim on|off"),
+                }
+            } else {
+                let state = if sim_mode.is_active() { "ON" } else { "OFF" };
+                println!("Simulation mode: {state}");
+            }
+        }
         "peers" => {
             let bindings = peer_registry.all();
             if bindings.is_empty() {
