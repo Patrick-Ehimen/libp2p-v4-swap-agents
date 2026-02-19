@@ -9,6 +9,11 @@ pub struct Cli {
     #[arg(short, long)]
     pub simulate: bool,
 
+    /// Execute real swaps against a local Anvil node (requires --simulate).
+    /// Start Anvil first: `anvil --fork-url $SEPOLIA_RPC_URL`
+    #[arg(long, requires = "simulate")]
+    pub local: bool,
+
     /// Multiaddr of a remote peer to dial on startup
     #[arg(value_name = "MULTIADDR")]
     pub dial: Option<String>,
