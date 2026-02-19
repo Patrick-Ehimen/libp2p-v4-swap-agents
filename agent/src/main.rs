@@ -33,10 +33,17 @@ async fn main() -> Result<()> {
     dotenvy::dotenv().ok();
 
     let cli = Cli::parse();
-    let sim_mode = SimulationMode::new(cli.simulate);
+    let sim_mode = SimulationMode::new(cli.simulate, cli.local);
 
-    // In simulation mode, env vars are optional — fall back to hardhat defaults
-    let (rpc_url, private_key) = if sim_mode.is_active() {
+    // Local mode: always use localhost:8545 (Anvil fork)
+    // Simulation mode: env vars optional, fall back to hardhat defaults
+    // Live mode: env vars required
+    let (rpc_url, private_key) = if sim_mode.is_local() {
+        let key = env::var("PRIVATE_KEY").unwrap_or_else(|_| {
+            "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80".to_string()
+        });
+        ("http://localhost:8545".to_string(), key)
+    } else if sim_mode.is_active() {
         let rpc = env::var("SEPOLIA_RPC_URL")
             .unwrap_or_else(|_| "http://localhost:8545".to_string());
         let key = env::var("PRIVATE_KEY").unwrap_or_else(|_| {
@@ -66,11 +73,7 @@ async fn main() -> Result<()> {
     let peer_id_str = swarm.local_peer_id().to_string();
     let own_binding = IdentityBinding::create(&private_key, &peer_id_str).await?;
 
-    let mode_label = if sim_mode.is_active() {
-        "SIMULATION"
-    } else {
-        "LIVE (Sepolia)"
-    };
+    let mode_label = sim_mode.get().label();
     println!("=== libp2p Uniswap V4 Swap Agent ===");
     println!("Mode:    {mode_label}");
     println!("Peer ID: {}", peer_id_str);
@@ -139,7 +142,7 @@ async fn handle_input(
             println!("  swap-v2-b <amount>  - Swap TKNB -> TKNA (V2 pool, fee rebates)");
             println!("  status              - Query V1 on-chain swap counts");
             println!("  status-v2           - Query V2 swap counts + your fee tier");
-            println!("  sim on|off          - Toggle simulation mode at runtime");
+            println!("  sim on|off|local    - Set execution mode (sim/live/local-anvil)");
             println!("  who                 - Show your PeerId and EOA");
             println!("  peers               - List all verified peer identities");
             println!("  help                - Show this message");
@@ -216,7 +219,9 @@ async fn handle_input(
                         };
                         publish_message(swarm, topic, &msg);
                         println!("Swap complete! tx: {tx_hash}");
-                        println!("  https://sepolia.etherscan.io/tx/{tx_hash}");
+                        if !sim_mode.is_local() {
+                            println!("  https://sepolia.etherscan.io/tx/{tx_hash}");
+                        }
                     }
                     Err(e) => println!("Swap failed: {e}"),
                 }
@@ -249,13 +254,16 @@ async fn handle_input(
                     }
                     "off" => {
                         sim_mode.set(false);
-                        println!("Simulation mode: OFF");
+                        println!("Simulation mode: OFF (live)");
                     }
-                    _ => println!("Usage: sim on|off"),
+                    "local" => {
+                        sim_mode.set_mode(sim::ExecutionMode::Local);
+                        println!("Simulation mode: LOCAL (Anvil)");
+                    }
+                    _ => println!("Usage: sim on|off|local"),
                 }
             } else {
-                let state = if sim_mode.is_active() { "ON" } else { "OFF" };
-                println!("Simulation mode: {state}");
+                println!("Execution mode: {}", sim_mode.get().label());
             }
         }
         "peers" => {

@@ -1,28 +1,17 @@
-use crate::sim::{simulated_tx_hash, SimulationMode};
+use crate::sim::{simulated_tx_hash, ExecutionMode, SimulationMode};
 
 #[test]
 fn simulation_mode_default_off() {
-    let mode = SimulationMode::new(false);
+    let mode = SimulationMode::new(false, false);
     assert!(!mode.is_active());
 }
 
 #[test]
 fn simulation_mode_toggle() {
-    let mode = SimulationMode::new(false);
+    let mode = SimulationMode::new(false, false);
     mode.set(true);
     assert!(mode.is_active());
     mode.set(false);
-    assert!(!mode.is_active());
-}
-
-#[test]
-fn simulation_mode_toggle_method() {
-    let mode = SimulationMode::new(false);
-    let new_state = mode.toggle();
-    assert!(new_state);
-    assert!(mode.is_active());
-    let new_state = mode.toggle();
-    assert!(!new_state);
     assert!(!mode.is_active());
 }
 
@@ -44,4 +33,44 @@ fn simulated_tx_hash_contains_peer_suffix() {
         hash.contains(expected_suffix),
         "hash {hash} should contain peer suffix {expected_suffix}"
     );
+}
+
+#[test]
+fn execution_mode_live_from_flags() {
+    let mode = SimulationMode::new(false, false);
+    assert_eq!(mode.get(), ExecutionMode::Live);
+    assert!(!mode.is_active());
+    assert!(!mode.is_local());
+}
+
+#[test]
+fn execution_mode_simulate_from_flags() {
+    let mode = SimulationMode::new(true, false);
+    assert_eq!(mode.get(), ExecutionMode::Simulate);
+    assert!(mode.is_active());
+    assert!(!mode.is_local());
+}
+
+#[test]
+fn execution_mode_local_from_flags() {
+    let mode = SimulationMode::new(true, true);
+    assert_eq!(mode.get(), ExecutionMode::Local);
+    assert!(!mode.is_active(), "is_active() should be false for Local mode");
+    assert!(mode.is_local());
+}
+
+#[test]
+fn execution_mode_labels() {
+    assert_eq!(ExecutionMode::Live.label(), "LIVE (Sepolia)");
+    assert_eq!(ExecutionMode::Simulate.label(), "SIMULATION");
+    assert_eq!(ExecutionMode::Local.label(), "LOCAL (Anvil)");
+}
+
+#[test]
+fn set_mode_to_local_at_runtime() {
+    let mode = SimulationMode::new(true, false);
+    assert!(mode.is_active());
+    mode.set_mode(ExecutionMode::Local);
+    assert!(mode.is_local());
+    assert!(!mode.is_active());
 }
