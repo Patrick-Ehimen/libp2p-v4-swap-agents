@@ -1,4 +1,4 @@
-use crate::network::{AgentMessage, TOPIC};
+use crate::network::{AgentMessage, INTENT_TOPIC, TOPIC};
 
 #[test]
 fn topic_constant() {
@@ -84,4 +84,80 @@ fn serialized_json_has_type_tag() {
     })
     .unwrap();
     assert_eq!(req["type"], "SwapRequest");
+}
+
+#[test]
+fn intent_topic_constant() {
+    assert_eq!(INTENT_TOPIC, "v4-swap-intents");
+}
+
+#[test]
+fn swap_intent_roundtrip() {
+    let msg = AgentMessage::SwapIntent {
+        agent: "peer1".into(),
+        direction: "TKNA -> TKNB".into(),
+        amount: "10".into(),
+        min_price: Some("0.95".into()),
+        max_price: Some("1.05".into()),
+        timestamp: 1700000000,
+    };
+    let json = serde_json::to_string(&msg).unwrap();
+    let decoded: AgentMessage = serde_json::from_str(&json).unwrap();
+    match decoded {
+        AgentMessage::SwapIntent {
+            agent,
+            direction,
+            amount,
+            min_price,
+            max_price,
+            timestamp,
+        } => {
+            assert_eq!(agent, "peer1");
+            assert_eq!(direction, "TKNA -> TKNB");
+            assert_eq!(amount, "10");
+            assert_eq!(min_price, Some("0.95".into()));
+            assert_eq!(max_price, Some("1.05".into()));
+            assert_eq!(timestamp, 1700000000);
+        }
+        _ => panic!("wrong variant"),
+    }
+}
+
+#[test]
+fn swap_intent_optional_prices_none() {
+    let msg = AgentMessage::SwapIntent {
+        agent: "peer2".into(),
+        direction: "TKNB -> TKNA".into(),
+        amount: "5".into(),
+        min_price: None,
+        max_price: None,
+        timestamp: 1700000001,
+    };
+    let json = serde_json::to_string(&msg).unwrap();
+    let decoded: AgentMessage = serde_json::from_str(&json).unwrap();
+    match decoded {
+        AgentMessage::SwapIntent {
+            min_price,
+            max_price,
+            ..
+        } => {
+            assert!(min_price.is_none());
+            assert!(max_price.is_none());
+        }
+        _ => panic!("wrong variant"),
+    }
+}
+
+#[test]
+fn swap_intent_serialized_json_has_type_tag() {
+    let intent = serde_json::to_value(&AgentMessage::SwapIntent {
+        agent: "a".into(),
+        direction: "d".into(),
+        amount: "1".into(),
+        min_price: None,
+        max_price: None,
+        timestamp: 0,
+    })
+    .unwrap();
+    assert_eq!(intent["type"], "SwapIntent");
 }
