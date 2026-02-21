@@ -8,6 +8,7 @@ mod uniswap;
 mod tests;
 
 use std::env;
+use std::time::Duration;
 
 use alloy::primitives::{Address, U256};
 use anyhow::Result;
@@ -20,7 +21,7 @@ use tracing_subscriber::EnvFilter;
 
 use cli::Cli;
 use identity::{IdentityBinding, PeerRegistry};
-use network::{AgentBehaviourEvent, AgentMessage, TOPIC};
+use network::{AgentBehaviourEvent, AgentMessage, INTENT_TOPIC, TOPIC};
 use sim::SimulationMode;
 use uniswap::SwapClient;
 
@@ -63,7 +64,9 @@ async fn main() -> Result<()> {
     let mut swarm = network::build_swarm()?;
 
     let topic = gossipsub::IdentTopic::new(TOPIC);
+    let intent_topic = gossipsub::IdentTopic::new(INTENT_TOPIC);
     swarm.behaviour_mut().gossipsub.subscribe(&topic)?;
+    swarm.behaviour_mut().gossipsub.subscribe(&intent_topic)?;
 
     // Listen on all interfaces
     swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse::<Multiaddr>()?)?;
@@ -103,12 +106,32 @@ async fn main() -> Result<()> {
     }
 
     let mut stdin = io::BufReader::new(io::stdin()).lines();
+    let mut pending_swap: Option<PendingSwap> = None;
 
     loop {
+        // If there's a pending swap, give the swarm time to flush the intent first
+        if let Some(swap) = pending_swap.take() {
+            // Poll swarm briefly to flush the queued intent message
+            let flush_deadline = tokio::time::sleep(Duration::from_millis(500));
+            tokio::pin!(flush_deadline);
+            loop {
+                tokio::select! {
+                    event = swarm.select_next_some() => {
+                        handle_swarm_event(event, &mut swarm, &topic, &attestation_msg, &mut peer_registry);
+                    }
+                    _ = &mut flush_deadline => break,
+                }
+            }
+
+            // Now execute the swap
+            execute_pending_swap(&swap, &topic, &mut swarm, &swap_client, &sim_mode).await;
+            continue;
+        }
+
         tokio::select! {
             line = stdin.next_line() => {
                 if let Ok(Some(line)) = line {
-                    handle_input(&line, &topic, &mut swarm, &swap_client, &peer_registry, &sim_mode).await;
+                    pending_swap = handle_input(&line, &topic, &intent_topic, &mut swarm, &swap_client, &peer_registry, &sim_mode).await;
                 }
             }
             event = swarm.select_next_some() => {
@@ -118,17 +141,27 @@ async fn main() -> Result<()> {
     }
 }
 
+/// Swap parameters stored between intent broadcast and execution.
+struct PendingSwap {
+    is_v2: bool,
+    zero_for_one: bool,
+    amount_str: String,
+    direction: String,
+    version: String,
+}
+
 async fn handle_input(
     line: &str,
     topic: &gossipsub::IdentTopic,
+    intent_topic: &gossipsub::IdentTopic,
     swarm: &mut libp2p::Swarm<network::AgentBehaviour>,
     swap_client: &SwapClient,
     peer_registry: &PeerRegistry,
     sim_mode: &SimulationMode,
-) {
+) -> Option<PendingSwap> {
     let trimmed = line.trim();
     if trimmed.is_empty() {
-        return;
+        return None;
     }
 
     let parts: Vec<&str> = trimmed.splitn(2, ' ').collect();
@@ -142,6 +175,7 @@ async fn handle_input(
             println!("  swap-v2-b <amount>  - Swap TKNB -> TKNA (V2 pool, fee rebates)");
             println!("  status              - Query V1 on-chain swap counts");
             println!("  status-v2           - Query V2 swap counts + your fee tier");
+            println!("  intent <amount> <a2b|b2a> [min] [max] - Broadcast swap intent");
             println!("  sim on|off|local    - Set execution mode (sim/live/local-anvil)");
             println!("  who                 - Show your PeerId and EOA");
             println!("  peers               - List all verified peer identities");
@@ -179,53 +213,29 @@ async fn handle_input(
             };
             let version = if is_v2 { "V2" } else { "V1" };
 
-            if sim_mode.is_active() {
-                let peer_id_str = swarm.local_peer_id().to_string();
-                let tx_hash = sim::simulated_tx_hash(&peer_id_str);
-                println!("[SIM] {version} swap: {amount_str} {direction}");
-                println!("[SIM] tx: {tx_hash}");
+            // Broadcast intent, then defer execution to the main loop
+            // so the swarm can flush the intent to peers first
+            let intent_msg = AgentMessage::SwapIntent {
+                agent: swarm.local_peer_id().to_string(),
+                direction: direction.to_string(),
+                amount: amount_str.to_string(),
+                min_price: None,
+                max_price: None,
+                timestamp: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+            };
+            publish_message(swarm, intent_topic, &intent_msg);
+            println!("[INTENT] Broadcast: {amount_str} {direction}");
 
-                let msg = AgentMessage::SwapExecuted {
-                    agent: peer_id_str,
-                    direction: direction.to_string(),
-                    amount: amount_str.to_string(),
-                    tx_hash,
-                };
-                publish_message(swarm, topic, &msg);
-            } else {
-                println!("Executing {version} swap: {amount_str} {direction}...");
-
-                let amount = match amount_str.parse::<u64>() {
-                    Ok(a) => U256::from(a) * U256::from(10u64.pow(18)),
-                    Err(_) => {
-                        println!("Invalid amount: {amount_str}");
-                        return;
-                    }
-                };
-
-                let result = if is_v2 {
-                    swap_client.execute_swap_v2(amount, zero_for_one).await
-                } else {
-                    swap_client.execute_swap(amount, zero_for_one).await
-                };
-
-                match result {
-                    Ok(tx_hash) => {
-                        let msg = AgentMessage::SwapExecuted {
-                            agent: swarm.local_peer_id().to_string(),
-                            direction: direction.to_string(),
-                            amount: amount_str.to_string(),
-                            tx_hash: tx_hash.clone(),
-                        };
-                        publish_message(swarm, topic, &msg);
-                        println!("Swap complete! tx: {tx_hash}");
-                        if !sim_mode.is_local() {
-                            println!("  https://sepolia.etherscan.io/tx/{tx_hash}");
-                        }
-                    }
-                    Err(e) => println!("Swap failed: {e}"),
-                }
-            }
+            return Some(PendingSwap {
+                is_v2,
+                zero_for_one,
+                amount_str: amount_str.to_string(),
+                direction: direction.to_string(),
+                version: version.to_string(),
+            });
         }
         "status" => match swap_client.get_swap_counts().await {
             Ok(counts) => println!("{counts}"),
@@ -244,7 +254,47 @@ async fn handle_input(
                 println!("EOA:    {}", binding.eoa);
             }
         }
-        // List all verified peer identity bindings
+        "intent" => {
+            if let Some(args) = parts.get(1) {
+                let tokens: Vec<&str> = args.split_whitespace().collect();
+                if tokens.len() >= 2 {
+                    let amount = tokens[0];
+                    let direction = match tokens[1] {
+                        "a2b" => "TKNA -> TKNB",
+                        "b2a" => "TKNB -> TKNA",
+                        other => {
+                            println!("Invalid direction '{other}'. Use a2b or b2a.");
+                            return None;
+                        }
+                    };
+                    let min_price = tokens.get(2).map(|s| s.to_string());
+                    let max_price = tokens.get(3).map(|s| s.to_string());
+                    let msg = AgentMessage::SwapIntent {
+                        agent: swarm.local_peer_id().to_string(),
+                        direction: direction.to_string(),
+                        amount: amount.to_string(),
+                        min_price: min_price.clone(),
+                        max_price: max_price.clone(),
+                        timestamp: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs(),
+                    };
+                    publish_message(swarm, intent_topic, &msg);
+                    let bounds = match (min_price, max_price) {
+                        (Some(min), Some(max)) => format!(" (bounds: {min}-{max})"),
+                        (Some(min), None) => format!(" (min: {min})"),
+                        (None, Some(max)) => format!(" (max: {max})"),
+                        _ => String::new(),
+                    };
+                    println!("[INTENT] Broadcast: {amount} {direction}{bounds}");
+                } else {
+                    println!("Usage: intent <amount> <a2b|b2a> [min_price] [max_price]");
+                }
+            } else {
+                println!("Usage: intent <amount> <a2b|b2a> [min_price] [max_price]");
+            }
+        }
         "sim" => {
             if let Some(arg) = parts.get(1) {
                 match *arg {
@@ -284,6 +334,7 @@ async fn handle_input(
             publish_message(swarm, topic, &msg);
         }
     }
+    None
 }
 
 fn publish_message(
@@ -304,6 +355,62 @@ fn publish_message(
         .publish(topic.clone(), json)
     {
         println!("Publish error: {e}");
+    }
+}
+
+async fn execute_pending_swap(
+    swap: &PendingSwap,
+    topic: &gossipsub::IdentTopic,
+    swarm: &mut libp2p::Swarm<network::AgentBehaviour>,
+    swap_client: &SwapClient,
+    sim_mode: &SimulationMode,
+) {
+    if sim_mode.is_active() {
+        let peer_id_str = swarm.local_peer_id().to_string();
+        let tx_hash = sim::simulated_tx_hash(&peer_id_str);
+        println!("[SIM] {} swap: {} {}", swap.version, swap.amount_str, swap.direction);
+        println!("[SIM] tx: {tx_hash}");
+
+        let msg = AgentMessage::SwapExecuted {
+            agent: peer_id_str,
+            direction: swap.direction.clone(),
+            amount: swap.amount_str.clone(),
+            tx_hash,
+        };
+        publish_message(swarm, topic, &msg);
+    } else {
+        println!("Executing {} swap: {} {}...", swap.version, swap.amount_str, swap.direction);
+
+        let amount = match swap.amount_str.parse::<u64>() {
+            Ok(a) => U256::from(a) * U256::from(10u64.pow(18)),
+            Err(_) => {
+                println!("Invalid amount: {}", swap.amount_str);
+                return;
+            }
+        };
+
+        let result = if swap.is_v2 {
+            swap_client.execute_swap_v2(amount, swap.zero_for_one).await
+        } else {
+            swap_client.execute_swap(amount, swap.zero_for_one).await
+        };
+
+        match result {
+            Ok(tx_hash) => {
+                let msg = AgentMessage::SwapExecuted {
+                    agent: swarm.local_peer_id().to_string(),
+                    direction: swap.direction.clone(),
+                    amount: swap.amount_str.clone(),
+                    tx_hash: tx_hash.clone(),
+                };
+                publish_message(swarm, topic, &msg);
+                println!("Swap complete! tx: {tx_hash}");
+                if !sim_mode.is_local() {
+                    println!("  https://sepolia.etherscan.io/tx/{tx_hash}");
+                }
+            }
+            Err(e) => println!("Swap failed: {e}"),
+        }
     }
 }
 
@@ -359,6 +466,28 @@ fn handle_swarm_event(
                     AgentMessage::SwapRequest { direction, amount } => {
                         println!(
                             "[REQUEST] Peer {peer_id} requests swap: {amount} ({direction})"
+                        );
+                    }
+                    AgentMessage::SwapIntent {
+                        agent,
+                        direction,
+                        amount,
+                        min_price,
+                        max_price,
+                        timestamp,
+                    } => {
+                        let bounds = match (min_price, max_price) {
+                            (Some(min), Some(max)) => format!(" bounds: {min}-{max}"),
+                            (Some(min), None) => format!(" min: {min}"),
+                            (None, Some(max)) => format!(" max: {max}"),
+                            _ => String::new(),
+                        };
+                        let secs = timestamp % 60;
+                        let mins = (timestamp / 60) % 60;
+                        let hours = (timestamp / 3600) % 24;
+                        let time_str = format!("{hours:02}:{mins:02}:{secs:02} UTC");
+                        println!(
+                            "[INTENT] Agent {agent} intends to swap {amount} ({direction}){bounds} at {time_str}"
                         );
                     }
                     // Verify incoming identity attestation and register if valid

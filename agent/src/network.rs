@@ -8,6 +8,7 @@ use libp2p::{gossipsub, mdns, noise, tcp, yamux, Swarm, SwarmBuilder};
 use serde::{Deserialize, Serialize};
 
 pub const TOPIC: &str = "v4-swap-agents";
+pub const INTENT_TOPIC: &str = "v4-swap-intents";
 
 #[derive(NetworkBehaviour)]
 pub struct AgentBehaviour {
@@ -36,6 +37,15 @@ pub enum AgentMessage {
         peer_id: String,
         eoa: String,
         signature: String,
+    },
+    /// Swap intent broadcast — signals intent to swap before execution
+    SwapIntent {
+        agent: String,
+        direction: String,
+        amount: String,
+        min_price: Option<String>,
+        max_price: Option<String>,
+        timestamp: u64,
     },
 }
 
