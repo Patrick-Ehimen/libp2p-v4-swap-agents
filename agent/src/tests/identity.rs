@@ -5,8 +5,7 @@ use crate::identity::{IdentityBinding, PeerRegistry};
 // Test private key (Hardhat account #0 — never use with real funds)
 const TEST_KEY: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 // Corresponding EOA for the test key
-const TEST_EOA: alloy::primitives::Address =
-    address!("f39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
+const TEST_EOA: alloy::primitives::Address = address!("f39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
 
 #[tokio::test]
 async fn attestation_roundtrip() {
@@ -20,7 +19,10 @@ async fn attestation_roundtrip() {
     assert!(!binding.signature.is_empty());
 
     // Verify the signature
-    assert!(binding.verify().expect("verify"), "signature should be valid");
+    assert!(
+        binding.verify().expect("verify"),
+        "signature should be valid"
+    );
 }
 
 #[tokio::test]

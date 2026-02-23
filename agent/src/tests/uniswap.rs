@@ -89,5 +89,8 @@ fn pool_key_v2_same_tokens() {
 
 #[test]
 fn hook_v2_address() {
-    assert_eq!(HOOK_V2, address!("A8760B755c67c5C75A8A60ED7E3713eA2448D0C0"));
+    assert_eq!(
+        HOOK_V2,
+        address!("A8760B755c67c5C75A8A60ED7E3713eA2448D0C0")
+    );
 }
