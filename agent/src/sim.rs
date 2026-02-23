@@ -88,7 +88,6 @@ impl SimulationMode {
         };
         self.set_mode(mode);
     }
-
 }
 
 /// Generate a synthetic transaction hash for simulation mode.

@@ -45,8 +45,8 @@ async fn main() -> Result<()> {
         });
         ("http://localhost:8545".to_string(), key)
     } else if sim_mode.is_active() {
-        let rpc = env::var("SEPOLIA_RPC_URL")
-            .unwrap_or_else(|_| "http://localhost:8545".to_string());
+        let rpc =
+            env::var("SEPOLIA_RPC_URL").unwrap_or_else(|_| "http://localhost:8545".to_string());
         let key = env::var("PRIVATE_KEY").unwrap_or_else(|_| {
             "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80".to_string()
         });
@@ -54,8 +54,8 @@ async fn main() -> Result<()> {
     } else {
         let rpc = env::var("SEPOLIA_RPC_URL")
             .expect("SEPOLIA_RPC_URL must be set (use --simulate to skip)");
-        let key = env::var("PRIVATE_KEY")
-            .expect("PRIVATE_KEY must be set (use --simulate to skip)");
+        let key =
+            env::var("PRIVATE_KEY").expect("PRIVATE_KEY must be set (use --simulate to skip)");
         (rpc, key)
     };
 
@@ -185,12 +185,10 @@ async fn handle_input(
         "dial" => {
             if let Some(addr) = parts.get(1) {
                 match addr.parse::<Multiaddr>() {
-                    Ok(remote) => {
-                        match swarm.dial(remote.clone()) {
-                            Ok(_) => println!("Dialing {remote}..."),
-                            Err(e) => println!("Dial failed: {e}"),
-                        }
-                    }
+                    Ok(remote) => match swarm.dial(remote.clone()) {
+                        Ok(_) => println!("Dialing {remote}..."),
+                        Err(e) => println!("Dial failed: {e}"),
+                    },
                     Err(e) => println!("Invalid multiaddr: {e}"),
                 }
             } else {
@@ -349,11 +347,7 @@ fn publish_message(
             return;
         }
     };
-    if let Err(e) = swarm
-        .behaviour_mut()
-        .gossipsub
-        .publish(topic.clone(), json)
-    {
+    if let Err(e) = swarm.behaviour_mut().gossipsub.publish(topic.clone(), json) {
         println!("Publish error: {e}");
     }
 }
@@ -368,7 +362,10 @@ async fn execute_pending_swap(
     if sim_mode.is_active() {
         let peer_id_str = swarm.local_peer_id().to_string();
         let tx_hash = sim::simulated_tx_hash(&peer_id_str);
-        println!("[SIM] {} swap: {} {}", swap.version, swap.amount_str, swap.direction);
+        println!(
+            "[SIM] {} swap: {} {}",
+            swap.version, swap.amount_str, swap.direction
+        );
         println!("[SIM] tx: {tx_hash}");
 
         let msg = AgentMessage::SwapExecuted {
@@ -379,7 +376,10 @@ async fn execute_pending_swap(
         };
         publish_message(swarm, topic, &msg);
     } else {
-        println!("Executing {} swap: {} {}...", swap.version, swap.amount_str, swap.direction);
+        println!(
+            "Executing {} swap: {} {}...",
+            swap.version, swap.amount_str, swap.direction
+        );
 
         let amount = match swap.amount_str.parse::<u64>() {
             Ok(a) => U256::from(a) * U256::from(10u64.pow(18)),
@@ -425,10 +425,7 @@ fn handle_swarm_event(
         SwarmEvent::Behaviour(AgentBehaviourEvent::Mdns(mdns::Event::Discovered(list))) => {
             for (peer_id, _addr) in list {
                 println!("mDNS discovered peer: {peer_id}");
-                swarm
-                    .behaviour_mut()
-                    .gossipsub
-                    .add_explicit_peer(&peer_id);
+                swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
             }
         }
         SwarmEvent::Behaviour(AgentBehaviourEvent::Mdns(mdns::Event::Expired(list))) => {
@@ -440,13 +437,11 @@ fn handle_swarm_event(
                     .remove_explicit_peer(&peer_id);
             }
         }
-        SwarmEvent::Behaviour(AgentBehaviourEvent::Gossipsub(
-            gossipsub::Event::Message {
-                propagation_source: peer_id,
-                message,
-                ..
-            },
-        )) => {
+        SwarmEvent::Behaviour(AgentBehaviourEvent::Gossipsub(gossipsub::Event::Message {
+            propagation_source: peer_id,
+            message,
+            ..
+        })) => {
             if let Ok(agent_msg) = serde_json::from_slice::<AgentMessage>(&message.data) {
                 match agent_msg {
                     AgentMessage::Chat { content } => {
@@ -464,9 +459,7 @@ fn handle_swarm_event(
                         println!("  https://sepolia.etherscan.io/tx/{tx_hash}");
                     }
                     AgentMessage::SwapRequest { direction, amount } => {
-                        println!(
-                            "[REQUEST] Peer {peer_id} requests swap: {amount} ({direction})"
-                        );
+                        println!("[REQUEST] Peer {peer_id} requests swap: {amount} ({direction})");
                     }
                     AgentMessage::SwapIntent {
                         agent,
@@ -542,10 +535,7 @@ fn handle_swarm_event(
         }
         SwarmEvent::ConnectionEstablished { peer_id, .. } => {
             println!("Connected to peer: {peer_id}");
-            swarm
-                .behaviour_mut()
-                .gossipsub
-                .add_explicit_peer(&peer_id);
+            swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
             // Publish our identity attestation so the new peer can verify our EOA
             publish_message(swarm, topic, attestation_msg);
         }

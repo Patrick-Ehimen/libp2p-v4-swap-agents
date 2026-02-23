@@ -1,3 +1,6 @@
+// sol! macro generates functions matching the Solidity ABI — argument counts are dictated by the contract interface
+#![allow(clippy::too_many_arguments)]
+
 use alloy::hex;
 use alloy::network::EthereumWallet;
 use alloy::primitives::{Address, Bytes, Signed, Uint, U256};
@@ -10,8 +13,7 @@ use anyhow::Result;
 // Contract addresses (Sepolia)
 pub const TKNA: Address = Address::new(hex!("7546360e0011Bb0B52ce10E21eF0E9341453fE71"));
 pub const TKNB: Address = Address::new(hex!("F6d91478e66CE8161e15Da103003F3BA6d2bab80"));
-pub const SWAP_ROUTER: Address =
-    Address::new(hex!("f13D190e9117920c703d79B5F33732e10049b115"));
+pub const SWAP_ROUTER: Address = Address::new(hex!("f13D190e9117920c703d79B5F33732e10049b115"));
 pub const HOOK: Address = Address::new(hex!("5D4505AA950a73379B8E9f1116976783Ba8340C0"));
 
 // V2 hook (dynamic fees + hookData agent tracking)
@@ -88,11 +90,7 @@ impl SwapClient {
         }
     }
 
-    pub async fn execute_swap(
-        &self,
-        amount: U256,
-        zero_for_one: bool,
-    ) -> Result<String> {
+    pub async fn execute_swap(&self, amount: U256, zero_for_one: bool) -> Result<String> {
         let signer: PrivateKeySigner = self.private_key.parse()?;
         let receiver = signer.address();
         let wallet = EthereumWallet::from(signer);
@@ -153,11 +151,7 @@ impl SwapClient {
     /// Execute a swap on the V2 pool.
     /// Unlike V1, this ABI-encodes the agent's EOA address into hookData so the
     /// AgentCounterV2 hook can track the real agent (not the router address).
-    pub async fn execute_swap_v2(
-        &self,
-        amount: U256,
-        zero_for_one: bool,
-    ) -> Result<String> {
+    pub async fn execute_swap_v2(&self, amount: U256, zero_for_one: bool) -> Result<String> {
         let signer: PrivateKeySigner = self.private_key.parse()?;
         let receiver = signer.address();
         let wallet = EthereumWallet::from(signer);
@@ -219,11 +213,7 @@ impl SwapClient {
         let hook = IAgentCounterV2::new(HOOK_V2, &provider);
         let pool_key = Self::pool_key_v2();
 
-        let pool_count = hook
-            .getPoolSwapCount(pool_key.clone())
-            .call()
-            .await?
-            ._0;
+        let pool_count = hook.getPoolSwapCount(pool_key.clone()).call().await?._0;
 
         let agent_count = hook
             .getAgentSwapCount(pool_key.clone(), agent_addr)
@@ -231,11 +221,7 @@ impl SwapClient {
             .await?
             ._0;
 
-        let agent_fee = hook
-            .getAgentFee(pool_key, agent_addr)
-            .call()
-            .await?
-            ._0;
+        let agent_fee = hook.getAgentFee(pool_key, agent_addr).call().await?._0;
 
         let fee_pct = f64::from(agent_fee) / 10000.0;
         Ok(format!(
@@ -256,11 +242,7 @@ impl SwapClient {
         let hook = IAgentCounter::new(HOOK, &provider);
         let pool_key = Self::pool_key();
 
-        let pool_count = hook
-            .getPoolSwapCount(pool_key.clone())
-            .call()
-            .await?
-            ._0;
+        let pool_count = hook.getPoolSwapCount(pool_key.clone()).call().await?._0;
 
         let agent_count = hook
             .getAgentSwapCount(pool_key, agent_addr)

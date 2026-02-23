@@ -55,7 +55,10 @@ fn execution_mode_simulate_from_flags() {
 fn execution_mode_local_from_flags() {
     let mode = SimulationMode::new(true, true);
     assert_eq!(mode.get(), ExecutionMode::Local);
-    assert!(!mode.is_active(), "is_active() should be false for Local mode");
+    assert!(
+        !mode.is_active(),
+        "is_active() should be false for Local mode"
+    );
     assert!(mode.is_local());
 }
 

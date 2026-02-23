@@ -70,18 +70,16 @@ pub fn build_swarm() -> Result<Swarm<AgentBehaviour>> {
                 .validation_mode(gossipsub::ValidationMode::Strict)
                 .message_id_fn(message_id_fn)
                 .build()
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+                .map_err(std::io::Error::other)?;
 
             let gossipsub = gossipsub::Behaviour::new(
                 gossipsub::MessageAuthenticity::Signed(key.clone()),
                 gossipsub_config,
             )
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            .map_err(std::io::Error::other)?;
 
-            let mdns = mdns::tokio::Behaviour::new(
-                mdns::Config::default(),
-                key.public().to_peer_id(),
-            )?;
+            let mdns =
+                mdns::tokio::Behaviour::new(mdns::Config::default(), key.public().to_peer_id())?;
 
             Ok(AgentBehaviour { gossipsub, mdns })
         })?
