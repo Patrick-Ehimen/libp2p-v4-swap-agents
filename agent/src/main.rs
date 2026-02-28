@@ -1,3 +1,4 @@
+mod archival;
 mod cli;
 mod identity;
 mod network;
@@ -19,6 +20,7 @@ use libp2p::{gossipsub, mdns, Multiaddr};
 use tokio::io::{self, AsyncBufReadExt};
 use tracing_subscriber::EnvFilter;
 
+use archival::{LogArchiver, LogEntry};
 use cli::Cli;
 use identity::{IdentityBinding, PeerRegistry};
 use network::{AgentBehaviourEvent, AgentMessage, INTENT_TOPIC, TOPIC};
@@ -35,6 +37,7 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     let sim_mode = SimulationMode::new(cli.simulate, cli.local);
+    let archiver = LogArchiver::new();
 
     // Local mode: always use localhost:8545 (Anvil fork)
     // Simulation mode: env vars optional, fall back to hardhat defaults
@@ -117,25 +120,33 @@ async fn main() -> Result<()> {
             loop {
                 tokio::select! {
                     event = swarm.select_next_some() => {
-                        handle_swarm_event(event, &mut swarm, &topic, &attestation_msg, &mut peer_registry);
+                        handle_swarm_event(event, &mut swarm, &topic, &attestation_msg, &mut peer_registry, &archiver);
                     }
                     _ = &mut flush_deadline => break,
                 }
             }
 
             // Now execute the swap
-            execute_pending_swap(&swap, &topic, &mut swarm, &swap_client, &sim_mode).await;
+            execute_pending_swap(
+                &swap,
+                &topic,
+                &mut swarm,
+                &swap_client,
+                &sim_mode,
+                &archiver,
+            )
+            .await;
             continue;
         }
 
         tokio::select! {
             line = stdin.next_line() => {
                 if let Ok(Some(line)) = line {
-                    pending_swap = handle_input(&line, &topic, &intent_topic, &mut swarm, &swap_client, &peer_registry, &sim_mode).await;
+                    pending_swap = handle_input(&line, &topic, &intent_topic, &mut swarm, &swap_client, &peer_registry, &sim_mode, &archiver).await;
                 }
             }
             event = swarm.select_next_some() => {
-                handle_swarm_event(event, &mut swarm, &topic, &attestation_msg, &mut peer_registry);
+                handle_swarm_event(event, &mut swarm, &topic, &attestation_msg, &mut peer_registry, &archiver);
             }
         }
     }
@@ -150,6 +161,7 @@ struct PendingSwap {
     version: String,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_input(
     line: &str,
     topic: &gossipsub::IdentTopic,
@@ -158,6 +170,7 @@ async fn handle_input(
     swap_client: &SwapClient,
     peer_registry: &PeerRegistry,
     sim_mode: &SimulationMode,
+    archiver: &LogArchiver,
 ) -> Option<PendingSwap> {
     let trimmed = line.trim();
     if trimmed.is_empty() {
@@ -177,6 +190,8 @@ async fn handle_input(
             println!("  status-v2           - Query V2 swap counts + your fee tier");
             println!("  intent <amount> <a2b|b2a> [min] [max] - Broadcast swap intent");
             println!("  sim on|off|local    - Set execution mode (sim/live/local-anvil)");
+            println!("  archive             - Flush log buffer to Filecoin via sidecar");
+            println!("  log-status          - Show log buffer count and sidecar URL");
             println!("  who                 - Show your PeerId and EOA");
             println!("  peers               - List all verified peer identities");
             println!("  help                - Show this message");
@@ -314,6 +329,16 @@ async fn handle_input(
                 println!("Execution mode: {}", sim_mode.get().label());
             }
         }
+        "archive" => match archiver.flush().await {
+            Ok(piece_cid) => {
+                println!("[ARCHIVE] Flushed to Filecoin — PieceCID: {piece_cid}");
+            }
+            Err(e) => println!("[ARCHIVE] Failed: {e}"),
+        },
+        "log-status" => {
+            println!("Log buffer: {} entries", archiver.buffer_len());
+            println!("Sidecar:    {}", archiver.sidecar_url());
+        }
         "peers" => {
             let bindings = peer_registry.all();
             if bindings.is_empty() {
@@ -358,6 +383,7 @@ async fn execute_pending_swap(
     swarm: &mut libp2p::Swarm<network::AgentBehaviour>,
     swap_client: &SwapClient,
     sim_mode: &SimulationMode,
+    archiver: &LogArchiver,
 ) {
     if sim_mode.is_active() {
         let peer_id_str = swarm.local_peer_id().to_string();
@@ -369,12 +395,18 @@ async fn execute_pending_swap(
         println!("[SIM] tx: {tx_hash}");
 
         let msg = AgentMessage::SwapExecuted {
-            agent: peer_id_str,
+            agent: peer_id_str.clone(),
             direction: swap.direction.clone(),
             amount: swap.amount_str.clone(),
-            tx_hash,
+            tx_hash: tx_hash.clone(),
         };
         publish_message(swarm, topic, &msg);
+        archiver.log(LogEntry::swap_executed(
+            &peer_id_str,
+            &swap.direction,
+            &swap.amount_str,
+            &tx_hash,
+        ));
     } else {
         println!(
             "Executing {} swap: {} {}...",
@@ -405,6 +437,12 @@ async fn execute_pending_swap(
                 };
                 publish_message(swarm, topic, &msg);
                 println!("Swap complete! tx: {tx_hash}");
+                archiver.log(LogEntry::swap_executed(
+                    &swarm.local_peer_id().to_string(),
+                    &swap.direction,
+                    &swap.amount_str,
+                    &tx_hash,
+                ));
                 if !sim_mode.is_local() {
                     println!("  https://sepolia.etherscan.io/tx/{tx_hash}");
                 }
@@ -420,6 +458,7 @@ fn handle_swarm_event(
     topic: &gossipsub::IdentTopic,
     attestation_msg: &AgentMessage,
     peer_registry: &mut PeerRegistry,
+    archiver: &LogArchiver,
 ) {
     match event {
         SwarmEvent::Behaviour(AgentBehaviourEvent::Mdns(mdns::Event::Discovered(list))) => {
@@ -508,12 +547,22 @@ fn handle_swarm_event(
                                     attested_peer_id, eoa_addr
                                 );
                                 peer_registry.register(binding);
+                                archiver.log(LogEntry::identity_attestation(
+                                    &attested_peer_id,
+                                    &format!("{eoa_addr}"),
+                                    true,
+                                ));
                             }
                             Ok(false) => {
                                 println!(
                                     "[IDENTITY] REJECTED (signature mismatch): {} claimed {}",
                                     attested_peer_id, eoa_addr
                                 );
+                                archiver.log(LogEntry::identity_attestation(
+                                    &attested_peer_id,
+                                    &format!("{eoa_addr}"),
+                                    false,
+                                ));
                             }
                             Err(e) => {
                                 println!(
