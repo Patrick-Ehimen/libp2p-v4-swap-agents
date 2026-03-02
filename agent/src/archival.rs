@@ -60,6 +60,13 @@ pub struct SidecarResponse {
     pub piece_cid: CidLink,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct RetrieveResponse {
+    #[serde(rename = "pieceCid")]
+    pub piece_cid: String,
+    pub data: serde_json::Value,
+}
+
 /// Buffers log entries in-memory and flushes to Filecoin via the Node.js sidecar.
 #[derive(Clone, Debug)]
 pub struct LogArchiver {
@@ -91,7 +98,7 @@ impl LogArchiver {
         &self.sidecar_url
     }
 
-    /// Serialize buffer as NDJSON, POST to sidecar, return PieceCID.
+    /// Serialize buffer as JSON array, POST to sidecar, return PieceCID.
     pub async fn flush(&self) -> Result<String> {
         let entries: Vec<LogEntry> = {
             let mut buf = self.buffer.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -101,11 +108,7 @@ impl LogArchiver {
             buf.drain(..).collect()
         };
 
-        let ndjson = entries
-            .iter()
-            .map(serde_json::to_string)
-            .collect::<Result<Vec<_>, _>>()?
-            .join("\n");
+        let json = serde_json::to_string(&entries)?;
 
         // Filecoin on-chain commits can take ~90s; keep connect timeout short
         let client = reqwest::Client::builder()
@@ -115,7 +118,7 @@ impl LogArchiver {
         let resp = client
             .post(format!("{}/upload", self.sidecar_url))
             .header("Content-Type", "application/json")
-            .body(ndjson)
+            .body(json)
             .send()
             .await?;
 
@@ -127,6 +130,27 @@ impl LogArchiver {
 
         let result: SidecarResponse = resp.json().await?;
         Ok(result.piece_cid.cid)
+    }
+
+    /// Retrieve archived data from Filecoin via the sidecar.
+    pub async fn retrieve(&self, piece_cid: &str) -> Result<RetrieveResponse> {
+        let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(180))
+            .build()?;
+        let resp = client
+            .get(format!("{}/retrieve/{}", self.sidecar_url, piece_cid))
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            bail!("Sidecar returned {status}: {body}");
+        }
+
+        let result: RetrieveResponse = resp.json().await?;
+        Ok(result)
     }
 }
 

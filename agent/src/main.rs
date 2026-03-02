@@ -191,6 +191,7 @@ async fn handle_input(
             println!("  intent <amount> <a2b|b2a> [min] [max] - Broadcast swap intent");
             println!("  sim on|off|local    - Set execution mode (sim/live/local-anvil)");
             println!("  archive             - Flush log buffer to Filecoin via sidecar");
+            println!("  retrieve <pieceCid> - Retrieve archived data from Filecoin");
             println!("  log-status          - Show log buffer count and sidecar URL");
             println!("  who                 - Show your PeerId and EOA");
             println!("  peers               - List all verified peer identities");
@@ -335,6 +336,20 @@ async fn handle_input(
             }
             Err(e) => println!("[ARCHIVE] Failed: {e}"),
         },
+        "retrieve" => {
+            if let Some(cid) = parts.get(1) {
+                println!("[RETRIEVE] Fetching from Filecoin...");
+                match archiver.retrieve(cid).await {
+                    Ok(result) => {
+                        println!("[RETRIEVE] PieceCID: {}", result.piece_cid);
+                        println!("{}", serde_json::to_string_pretty(&result.data).unwrap_or_default());
+                    }
+                    Err(e) => println!("[RETRIEVE] Failed: {e}"),
+                }
+            } else {
+                println!("Usage: retrieve <pieceCid>");
+            }
+        }
         "log-status" => {
             println!("Log buffer: {} entries", archiver.buffer_len());
             println!("Sidecar:    {}", archiver.sidecar_url());
