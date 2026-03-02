@@ -38,5 +38,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
 thiserror = "1"
 
+# HTTP client (sidecar communication)
+reqwest = { version = "0.12", features = ["json"] }
+
+# Timestamps
+chrono = { version = "0.4", features = ["serde"] }
+
 # Environment variables
 dotenvy = "0.15"
