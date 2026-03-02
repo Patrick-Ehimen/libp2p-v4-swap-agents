@@ -342,7 +342,10 @@ async fn handle_input(
                 match archiver.retrieve(cid).await {
                     Ok(result) => {
                         println!("[RETRIEVE] PieceCID: {}", result.piece_cid);
-                        println!("{}", serde_json::to_string_pretty(&result.data).unwrap_or_default());
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&result.data).unwrap_or_default()
+                        );
                     }
                     Err(e) => println!("[RETRIEVE] Failed: {e}"),
                 }
