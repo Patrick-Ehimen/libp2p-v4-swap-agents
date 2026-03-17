@@ -2,6 +2,7 @@ mod archival;
 mod cli;
 mod identity;
 mod network;
+mod reputation;
 mod sim;
 mod uniswap;
 
@@ -24,6 +25,7 @@ use archival::{LogArchiver, LogEntry};
 use cli::Cli;
 use identity::{IdentityBinding, PeerRegistry};
 use network::{AgentBehaviourEvent, AgentMessage, INTENT_TOPIC, TOPIC};
+use reputation::ReputationStore;
 use sim::SimulationMode;
 use uniswap::SwapClient;
 
@@ -71,6 +73,14 @@ async fn main() -> Result<()> {
     swarm.behaviour_mut().gossipsub.subscribe(&topic)?;
     swarm.behaviour_mut().gossipsub.subscribe(&intent_topic)?;
 
+    // Activate gossipsub peer scoring with application-specific score (P5)
+    let (score_params, score_thresholds) = network::build_peer_score_params();
+    swarm
+        .behaviour_mut()
+        .gossipsub
+        .with_peer_score(score_params, score_thresholds)
+        .expect("valid peer score params");
+
     // Listen on all interfaces
     swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse::<Multiaddr>()?)?;
     swarm.listen_on("/ip4/0.0.0.0/udp/0/quic-v1".parse::<Multiaddr>()?)?;
@@ -96,6 +106,7 @@ async fn main() -> Result<()> {
 
     let mut peer_registry = PeerRegistry::new();
     peer_registry.register(own_binding);
+    let reputation_store = ReputationStore::new();
 
     // Dial a remote peer if provided as CLI argument
     if let Some(addr) = cli.dial {
@@ -120,9 +131,23 @@ async fn main() -> Result<()> {
             loop {
                 tokio::select! {
                     event = swarm.select_next_some() => {
-                        handle_swarm_event(event, &mut swarm, &topic, &attestation_msg, &mut peer_registry, &archiver);
+                        handle_swarm_event(event, &mut swarm, &topic, &attestation_msg, &mut peer_registry, &archiver, &reputation_store);
                     }
                     _ = &mut flush_deadline => break,
+                }
+            }
+
+            // Check conditions before executing
+            if !swap.conditions.is_empty() {
+                let peer_id_str = swarm.local_peer_id().to_string();
+                match swap.conditions.evaluate(&peer_id_str, &reputation_store) {
+                    reputation::ConditionResult::Passed => {
+                        println!("[CSWAP] Conditions met, executing...");
+                    }
+                    reputation::ConditionResult::Failed(reason) => {
+                        println!("[CSWAP] REJECTED: {reason}");
+                        continue;
+                    }
                 }
             }
 
@@ -142,11 +167,11 @@ async fn main() -> Result<()> {
         tokio::select! {
             line = stdin.next_line() => {
                 if let Ok(Some(line)) = line {
-                    pending_swap = handle_input(&line, &topic, &intent_topic, &mut swarm, &swap_client, &peer_registry, &sim_mode, &archiver).await;
+                    pending_swap = handle_input(&line, &topic, &intent_topic, &mut swarm, &swap_client, &peer_registry, &sim_mode, &archiver, &reputation_store).await;
                 }
             }
             event = swarm.select_next_some() => {
-                handle_swarm_event(event, &mut swarm, &topic, &attestation_msg, &mut peer_registry, &archiver);
+                handle_swarm_event(event, &mut swarm, &topic, &attestation_msg, &mut peer_registry, &archiver, &reputation_store);
             }
         }
     }
@@ -159,6 +184,7 @@ struct PendingSwap {
     amount_str: String,
     direction: String,
     version: String,
+    conditions: reputation::SwapConditions,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -171,6 +197,7 @@ async fn handle_input(
     peer_registry: &PeerRegistry,
     sim_mode: &SimulationMode,
     archiver: &LogArchiver,
+    reputation_store: &ReputationStore,
 ) -> Option<PendingSwap> {
     let trimmed = line.trim();
     if trimmed.is_empty() {
@@ -186,15 +213,20 @@ async fn handle_input(
             println!("  swap-b <amount>     - Swap TKNB -> TKNA (V1 pool)");
             println!("  swap-v2 <amount>    - Swap TKNA -> TKNB (V2 pool, fee rebates)");
             println!("  swap-v2-b <amount>  - Swap TKNB -> TKNA (V2 pool, fee rebates)");
+            println!("  cswap <amount> <a2b|b2a> [options] - Conditional swap");
+            println!("    --min-rep <score>   Minimum reputation score (0.0-1.0)");
+            println!("    --min-price <val>   Price floor");
+            println!("    --max-price <val>   Price ceiling");
             println!("  status              - Query V1 on-chain swap counts");
             println!("  status-v2           - Query V2 swap counts + your fee tier");
             println!("  intent <amount> <a2b|b2a> [min] [max] - Broadcast swap intent");
+            println!("  reputation [peer]   - Show reputation scores");
             println!("  sim on|off|local    - Set execution mode (sim/live/local-anvil)");
             println!("  archive             - Flush log buffer to Filecoin via sidecar");
             println!("  retrieve <pieceCid> - Retrieve archived data from Filecoin");
             println!("  log-status          - Show log buffer count and sidecar URL");
             println!("  who                 - Show your PeerId and EOA");
-            println!("  peers               - List all verified peer identities");
+            println!("  peers               - List all verified peer identities + trust");
             println!("  help                - Show this message");
             println!("  <text>              - Send chat message to peers");
         }
@@ -249,6 +281,7 @@ async fn handle_input(
                 amount_str: amount_str.to_string(),
                 direction: direction.to_string(),
                 version: version.to_string(),
+                conditions: reputation::SwapConditions::default(),
             });
         }
         "status" => match swap_client.get_swap_counts().await {
@@ -364,8 +397,125 @@ async fn handle_input(
             } else {
                 println!("Verified peers ({}):", bindings.len());
                 for binding in bindings.values() {
-                    println!("  {} -> {}", binding.peer_id, binding.eoa);
+                    let trust = reputation_store.trust_level(&binding.peer_id);
+                    let score = reputation_store.score(&binding.peer_id);
+                    println!(
+                        "  {} -> {} [Trust: {} | Score: {:.2}]",
+                        binding.peer_id, binding.eoa, trust, score
+                    );
                 }
+            }
+        }
+        "reputation" | "rep" => {
+            if let Some(peer_id) = parts.get(1) {
+                println!("{}", reputation_store.summary(peer_id.trim()));
+            } else {
+                let all = reputation_store.all();
+                if all.is_empty() {
+                    println!("No reputation data yet.");
+                } else {
+                    println!("Peer reputations ({}):", all.len());
+                    for (pid, rep) in &all {
+                        println!(
+                            "  {} — Score: {:.2} | Trust: {} | Swaps: {} | ID: {}",
+                            pid,
+                            rep.composite_score(),
+                            rep.trust_level(),
+                            rep.swap_count,
+                            if rep.identity_verified {
+                                "verified"
+                            } else {
+                                "unverified"
+                            }
+                        );
+                    }
+                }
+            }
+        }
+        "cswap" => {
+            if let Some(args) = parts.get(1) {
+                let tokens: Vec<&str> = args.split_whitespace().collect();
+                if tokens.len() < 2 {
+                    println!("Usage: cswap <amount> <a2b|b2a> [--min-rep <score>] [--min-price <val>] [--max-price <val>]");
+                    return None;
+                }
+                let amount = tokens[0];
+                let direction = match tokens[1] {
+                    "a2b" => "TKNA -> TKNB",
+                    "b2a" => "TKNB -> TKNA",
+                    other => {
+                        println!("Invalid direction '{other}'. Use a2b or b2a.");
+                        return None;
+                    }
+                };
+                let zero_for_one = tokens[1] == "a2b";
+
+                let mut conditions = reputation::SwapConditions::default();
+                let mut i = 2;
+                while i < tokens.len() {
+                    match tokens[i] {
+                        "--min-rep" => {
+                            if let Some(val) = tokens.get(i + 1) {
+                                conditions.min_reputation = val.parse().ok();
+                                i += 2;
+                            } else {
+                                i += 1;
+                            }
+                        }
+                        "--min-price" => {
+                            conditions.min_price = tokens.get(i + 1).map(|s| s.to_string());
+                            i += 2;
+                        }
+                        "--max-price" => {
+                            conditions.max_price = tokens.get(i + 1).map(|s| s.to_string());
+                            i += 2;
+                        }
+                        _ => {
+                            i += 1;
+                        }
+                    }
+                }
+
+                let intent_msg = AgentMessage::SwapIntent {
+                    agent: swarm.local_peer_id().to_string(),
+                    direction: direction.to_string(),
+                    amount: amount.to_string(),
+                    min_price: conditions.min_price.clone(),
+                    max_price: conditions.max_price.clone(),
+                    timestamp: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs(),
+                };
+                publish_message(swarm, intent_topic, &intent_msg);
+
+                let mut cond_parts = Vec::new();
+                if let Some(rep) = conditions.min_reputation {
+                    cond_parts.push(format!("min-rep: {rep:.2}"));
+                }
+                if let Some(ref p) = conditions.min_price {
+                    cond_parts.push(format!("min-price: {p}"));
+                }
+                if let Some(ref p) = conditions.max_price {
+                    cond_parts.push(format!("max-price: {p}"));
+                }
+                let cond_str = if cond_parts.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", cond_parts.join(", "))
+                };
+                println!("[CSWAP] Broadcast conditional intent: {amount} {direction}{cond_str}");
+
+                return Some(PendingSwap {
+                    is_v2: false,
+                    zero_for_one,
+                    amount_str: amount.to_string(),
+                    direction: direction.to_string(),
+                    version: "V1".to_string(),
+                    conditions,
+                });
+            } else {
+                println!("Usage: cswap <amount> <a2b|b2a> [--min-rep <score>] [--min-price <val>] [--max-price <val>]");
             }
         }
         _ => {
@@ -477,6 +627,7 @@ fn handle_swarm_event(
     attestation_msg: &AgentMessage,
     peer_registry: &mut PeerRegistry,
     archiver: &LogArchiver,
+    reputation_store: &ReputationStore,
 ) {
     match event {
         SwarmEvent::Behaviour(AgentBehaviourEvent::Mdns(mdns::Event::Discovered(list))) => {
@@ -514,6 +665,14 @@ fn handle_swarm_event(
                             "[SWAP] Agent {agent} swapped {amount} ({direction}) tx: {tx_hash}"
                         );
                         println!("  https://sepolia.etherscan.io/tx/{tx_hash}");
+                        reputation_store.record_swap(&agent);
+                        if let Ok(pid) = agent.parse::<libp2p::PeerId>() {
+                            let app_score = reputation_store.score(&agent) * 100.0;
+                            swarm
+                                .behaviour_mut()
+                                .gossipsub
+                                .set_application_score(&pid, app_score);
+                        }
                     }
                     AgentMessage::SwapRequest { direction, amount } => {
                         println!("[REQUEST] Peer {peer_id} requests swap: {amount} ({direction})");
@@ -539,6 +698,14 @@ fn handle_swarm_event(
                         println!(
                             "[INTENT] Agent {agent} intends to swap {amount} ({direction}){bounds} at {time_str}"
                         );
+                        reputation_store.record_intent(&agent);
+                        if let Ok(pid) = agent.parse::<libp2p::PeerId>() {
+                            let app_score = reputation_store.score(&agent) * 100.0;
+                            swarm
+                                .behaviour_mut()
+                                .gossipsub
+                                .set_application_score(&pid, app_score);
+                        }
                     }
                     // Verify incoming identity attestation and register if valid
                     AgentMessage::IdentityAttestation {
@@ -565,6 +732,7 @@ fn handle_swarm_event(
                                     attested_peer_id, eoa_addr
                                 );
                                 peer_registry.register(binding);
+                                reputation_store.set_identity_verified(&attested_peer_id, true);
                                 archiver.log(LogEntry::identity_attestation(
                                     &attested_peer_id,
                                     &format!("{eoa_addr}"),

@@ -49,6 +49,46 @@ pub enum AgentMessage {
     },
 }
 
+/// Build gossipsub peer scoring parameters tuned for swap agent network.
+/// Returns params and thresholds for use with `Behaviour::with_peer_score`.
+pub fn build_peer_score_params() -> (gossipsub::PeerScoreParams, gossipsub::PeerScoreThresholds) {
+    let mut params = gossipsub::PeerScoreParams::default();
+
+    let topic_params = gossipsub::TopicScoreParams {
+        topic_weight: 1.0,
+        // P1: reward time in mesh
+        time_in_mesh_weight: 0.5,
+        time_in_mesh_quantum: Duration::from_secs(1),
+        time_in_mesh_cap: 100.0,
+        // P2: reward first message deliveries
+        first_message_deliveries_weight: 1.0,
+        first_message_deliveries_decay: 0.97,
+        first_message_deliveries_cap: 100.0,
+        // P3: disabled — too aggressive for small demo networks (<10 peers)
+        mesh_message_deliveries_weight: 0.0,
+        ..Default::default()
+    };
+
+    let swap_topic_hash = gossipsub::IdentTopic::new(TOPIC).hash();
+    let intent_topic_hash = gossipsub::IdentTopic::new(INTENT_TOPIC).hash();
+    params.topics.insert(swap_topic_hash, topic_params.clone());
+    params.topics.insert(intent_topic_hash, topic_params);
+
+    // P5: application-specific score weight (fed by ReputationStore)
+    params.app_specific_weight = 10.0;
+
+    // Lenient thresholds for a demo network
+    let thresholds = gossipsub::PeerScoreThresholds {
+        gossip_threshold: -100.0,
+        publish_threshold: -200.0,
+        graylist_threshold: -400.0,
+        accept_px_threshold: 0.0,
+        opportunistic_graft_threshold: 5.0,
+    };
+
+    (params, thresholds)
+}
+
 pub fn build_swarm() -> Result<Swarm<AgentBehaviour>> {
     let swarm = SwarmBuilder::with_new_identity()
         .with_tokio()
