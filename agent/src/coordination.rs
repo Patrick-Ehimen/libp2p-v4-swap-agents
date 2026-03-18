@@ -40,6 +40,7 @@ impl SwapProposal {
     }
 
     /// Check if a direction matches the desired counter-swap.
+    #[cfg(test)]
     pub fn matches_desired(&self, direction: &str) -> bool {
         self.desired_direction == direction
     }
@@ -109,6 +110,7 @@ impl CoordinationBook {
     }
 
     /// Get all proposals (including expired).
+    #[cfg(test)]
     pub fn all(&self) -> HashMap<String, (SwapProposal, CoordinationStatus)> {
         self.proposals.lock().unwrap().clone()
     }
@@ -131,6 +133,7 @@ impl CoordinationBook {
     }
 
     /// Count of active proposals.
+    #[cfg(test)]
     pub fn active_count(&self) -> usize {
         self.active_proposals().len()
     }

@@ -851,6 +851,7 @@ async fn execute_pending_swap(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_swarm_event(
     event: SwarmEvent<AgentBehaviourEvent>,
     swarm: &mut libp2p::Swarm<network::AgentBehaviour>,
@@ -1039,13 +1040,13 @@ fn handle_swarm_event(
                             // If we are the initiator, execute our side
                             if let Some((proposal, _)) = coordination_book.get(&proposal_id) {
                                 if proposal.initiator == swarm.local_peer_id().to_string() {
+                                    let hint = if proposal.direction.contains("TKNA -> TKNB") {
+                                        proposal.amount.clone()
+                                    } else {
+                                        format!("-b {}", proposal.amount)
+                                    };
                                     println!(
-                                        "[COORD] Counterparty accepted! Execute your swap: swap {}",
-                                        if proposal.direction.contains("TKNA -> TKNB") {
-                                            format!("{}", proposal.amount)
-                                        } else {
-                                            format!("-b {}", proposal.amount)
-                                        }
+                                        "[COORD] Counterparty accepted! Execute your swap: swap {hint}"
                                     );
                                 }
                             }
