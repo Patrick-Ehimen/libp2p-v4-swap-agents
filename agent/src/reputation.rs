@@ -75,6 +75,7 @@ impl PeerReputation {
 
     /// Compute recency score relative to a specific reference timestamp.
     /// Used for deterministic testing.
+    #[cfg(test)]
     pub fn recency_score_at(&self, now_secs: u64) -> f64 {
         if self.last_active == 0 {
             return 0.0;
@@ -178,6 +179,7 @@ pub enum ConditionResult {
 }
 
 impl ConditionResult {
+    #[cfg(test)]
     pub fn is_passed(&self) -> bool {
         matches!(self, ConditionResult::Passed)
     }
@@ -237,6 +239,7 @@ impl ReputationStore {
     }
 
     /// Get the reputation for a specific peer.
+    #[cfg(test)]
     pub fn get(&self, peer_id: &str) -> Option<PeerReputation> {
         self.peers.lock().unwrap().get(peer_id).cloned()
     }

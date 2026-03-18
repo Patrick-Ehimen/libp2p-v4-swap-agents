@@ -1,5 +1,6 @@
 mod archival;
 mod cli;
+mod coordination;
 mod identity;
 mod network;
 mod reputation;
@@ -23,6 +24,7 @@ use tracing_subscriber::EnvFilter;
 
 use archival::{LogArchiver, LogEntry};
 use cli::Cli;
+use coordination::CoordinationBook;
 use identity::{IdentityBinding, PeerRegistry};
 use network::{AgentBehaviourEvent, AgentMessage, INTENT_TOPIC, TOPIC};
 use reputation::ReputationStore;
@@ -107,6 +109,7 @@ async fn main() -> Result<()> {
     let mut peer_registry = PeerRegistry::new();
     peer_registry.register(own_binding);
     let reputation_store = ReputationStore::new();
+    let coordination_book = CoordinationBook::new();
 
     // Dial a remote peer if provided as CLI argument
     if let Some(addr) = cli.dial {
@@ -131,7 +134,7 @@ async fn main() -> Result<()> {
             loop {
                 tokio::select! {
                     event = swarm.select_next_some() => {
-                        handle_swarm_event(event, &mut swarm, &topic, &attestation_msg, &mut peer_registry, &archiver, &reputation_store);
+                        handle_swarm_event(event, &mut swarm, &topic, &attestation_msg, &mut peer_registry, &archiver, &reputation_store, &coordination_book);
                     }
                     _ = &mut flush_deadline => break,
                 }
@@ -159,6 +162,7 @@ async fn main() -> Result<()> {
                 &swap_client,
                 &sim_mode,
                 &archiver,
+                &coordination_book,
             )
             .await;
             continue;
@@ -167,11 +171,11 @@ async fn main() -> Result<()> {
         tokio::select! {
             line = stdin.next_line() => {
                 if let Ok(Some(line)) = line {
-                    pending_swap = handle_input(&line, &topic, &intent_topic, &mut swarm, &swap_client, &peer_registry, &sim_mode, &archiver, &reputation_store).await;
+                    pending_swap = handle_input(&line, &topic, &intent_topic, &mut swarm, &swap_client, &peer_registry, &sim_mode, &archiver, &reputation_store, &coordination_book).await;
                 }
             }
             event = swarm.select_next_some() => {
-                handle_swarm_event(event, &mut swarm, &topic, &attestation_msg, &mut peer_registry, &archiver, &reputation_store);
+                handle_swarm_event(event, &mut swarm, &topic, &attestation_msg, &mut peer_registry, &archiver, &reputation_store, &coordination_book);
             }
         }
     }
@@ -185,6 +189,8 @@ struct PendingSwap {
     direction: String,
     version: String,
     conditions: reputation::SwapConditions,
+    /// If this swap is part of a coordinated proposal.
+    proposal_id: Option<String>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -198,6 +204,7 @@ async fn handle_input(
     sim_mode: &SimulationMode,
     archiver: &LogArchiver,
     reputation_store: &ReputationStore,
+    coordination_book: &CoordinationBook,
 ) -> Option<PendingSwap> {
     let trimmed = line.trim();
     if trimmed.is_empty() {
@@ -220,6 +227,9 @@ async fn handle_input(
             println!("  status              - Query V1 on-chain swap counts");
             println!("  status-v2           - Query V2 swap counts + your fee tier");
             println!("  intent <amount> <a2b|b2a> [min] [max] - Broadcast swap intent");
+            println!("  propose <amt> <a2b|b2a> <desired_amt> [--min-rep <score>] - Propose coordinated swap");
+            println!("  accept <proposal-id>  - Accept a swap proposal");
+            println!("  proposals           - List active proposals");
             println!("  reputation [peer]   - Show reputation scores");
             println!("  sim on|off|local    - Set execution mode (sim/live/local-anvil)");
             println!("  archive             - Flush log buffer to Filecoin via sidecar");
@@ -282,6 +292,7 @@ async fn handle_input(
                 direction: direction.to_string(),
                 version: version.to_string(),
                 conditions: reputation::SwapConditions::default(),
+                proposal_id: None,
             });
         }
         "status" => match swap_client.get_swap_counts().await {
@@ -513,9 +524,200 @@ async fn handle_input(
                     direction: direction.to_string(),
                     version: "V1".to_string(),
                     conditions,
+                    proposal_id: None,
                 });
             } else {
                 println!("Usage: cswap <amount> <a2b|b2a> [--min-rep <score>] [--min-price <val>] [--max-price <val>]");
+            }
+        }
+        "propose" => {
+            if let Some(args) = parts.get(1) {
+                let tokens: Vec<&str> = args.split_whitespace().collect();
+                if tokens.len() < 3 {
+                    println!(
+                        "Usage: propose <amount> <a2b|b2a> <desired_amount> [--min-rep <score>]"
+                    );
+                    return None;
+                }
+                let amount = tokens[0];
+                let (direction, desired_direction, zero_for_one) = match tokens[1] {
+                    "a2b" => ("TKNA -> TKNB", "TKNB -> TKNA", true),
+                    "b2a" => ("TKNB -> TKNA", "TKNA -> TKNB", false),
+                    other => {
+                        println!("Invalid direction '{other}'. Use a2b or b2a.");
+                        return None;
+                    }
+                };
+                let desired_amount = tokens[2];
+
+                let mut min_reputation = None;
+                let mut i = 3;
+                while i < tokens.len() {
+                    if tokens[i] == "--min-rep" {
+                        if let Some(val) = tokens.get(i + 1) {
+                            min_reputation = val.parse().ok();
+                        }
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+
+                let peer_id_str = swarm.local_peer_id().to_string();
+                let proposal_id = coordination::generate_proposal_id(&peer_id_str);
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+
+                let proposal = coordination::SwapProposal {
+                    proposal_id: proposal_id.clone(),
+                    initiator: peer_id_str,
+                    direction: direction.to_string(),
+                    amount: amount.to_string(),
+                    desired_direction: desired_direction.to_string(),
+                    desired_amount: desired_amount.to_string(),
+                    min_reputation,
+                    expires_at: now + coordination::PROPOSAL_EXPIRY_SECS,
+                };
+
+                coordination_book.add_proposal(proposal.clone());
+
+                let msg = AgentMessage::SwapProposal {
+                    proposal_id: proposal.proposal_id.clone(),
+                    initiator: proposal.initiator.clone(),
+                    direction: proposal.direction.clone(),
+                    amount: proposal.amount.clone(),
+                    desired_direction: proposal.desired_direction.clone(),
+                    desired_amount: proposal.desired_amount.clone(),
+                    min_reputation: proposal.min_reputation,
+                    expires_at: proposal.expires_at,
+                };
+                publish_message(swarm, topic, &msg);
+                let rep_str = min_reputation
+                    .map(|r| format!(" (min-rep: {r:.2})"))
+                    .unwrap_or_default();
+                println!(
+                    "[PROPOSE] {proposal_id}: {amount} {direction} seeking {desired_amount} {desired_direction}{rep_str}"
+                );
+
+                // Also return a PendingSwap so the initiator executes after acceptance
+                // The main loop will handle the execution flow
+                let _ = zero_for_one; // used later when accept triggers execution
+            } else {
+                println!("Usage: propose <amount> <a2b|b2a> <desired_amount> [--min-rep <score>]");
+            }
+        }
+        "accept" => {
+            if let Some(proposal_id) = parts.get(1) {
+                let proposal_id = proposal_id.trim();
+                match coordination_book.get(proposal_id) {
+                    Some((proposal, coordination::CoordinationStatus::Pending)) => {
+                        if proposal.is_expired() {
+                            println!("[ACCEPT] Proposal {proposal_id} has expired.");
+                            return None;
+                        }
+
+                        // Check reputation gate
+                        let my_peer_id = swarm.local_peer_id().to_string();
+                        if let Some(min_rep) = proposal.min_reputation {
+                            let my_score = reputation_store.score(&my_peer_id);
+                            if my_score < min_rep {
+                                println!(
+                                    "[ACCEPT] Cannot accept: your reputation {:.2} < required {:.2}",
+                                    my_score, min_rep
+                                );
+                                return None;
+                            }
+                        }
+
+                        coordination_book.update_status(
+                            proposal_id,
+                            coordination::CoordinationStatus::Accepted {
+                                acceptor: my_peer_id.clone(),
+                            },
+                        );
+
+                        let msg = AgentMessage::SwapAcceptance {
+                            proposal_id: proposal_id.to_string(),
+                            acceptor: my_peer_id,
+                        };
+                        publish_message(swarm, topic, &msg);
+                        println!("[ACCEPT] Accepted proposal {proposal_id}");
+
+                        // Execute the desired counter-swap
+                        let zero_for_one = proposal.desired_direction.contains("TKNA -> TKNB");
+                        let intent_msg = AgentMessage::SwapIntent {
+                            agent: swarm.local_peer_id().to_string(),
+                            direction: proposal.desired_direction.clone(),
+                            amount: proposal.desired_amount.clone(),
+                            min_price: None,
+                            max_price: None,
+                            timestamp: std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs(),
+                        };
+                        publish_message(swarm, intent_topic, &intent_msg);
+                        println!(
+                            "[COORD] Executing counter-swap: {} {}",
+                            proposal.desired_amount, proposal.desired_direction
+                        );
+
+                        return Some(PendingSwap {
+                            is_v2: false,
+                            zero_for_one,
+                            amount_str: proposal.desired_amount.clone(),
+                            direction: proposal.desired_direction.clone(),
+                            version: "V1".to_string(),
+                            conditions: reputation::SwapConditions::default(),
+                            proposal_id: Some(proposal.proposal_id.clone()),
+                        });
+                    }
+                    Some((_, _)) => {
+                        println!("[ACCEPT] Proposal {proposal_id} is no longer pending.");
+                    }
+                    None => {
+                        println!("[ACCEPT] Proposal {proposal_id} not found.");
+                    }
+                }
+            } else {
+                println!("Usage: accept <proposal-id>");
+            }
+        }
+        "proposals" => {
+            coordination_book.cleanup_expired();
+            let active = coordination_book.active_proposals();
+            if active.is_empty() {
+                println!("No active proposals.");
+            } else {
+                println!("Active proposals ({}):", active.len());
+                for (proposal, status) in &active {
+                    let status_str = match status {
+                        coordination::CoordinationStatus::Pending => "pending".to_string(),
+                        coordination::CoordinationStatus::Accepted { acceptor } => {
+                            format!("accepted by {}", &acceptor[..8.min(acceptor.len())])
+                        }
+                        coordination::CoordinationStatus::InitiatorExecuted { tx_hash } => {
+                            format!("initiator executed: {}", &tx_hash[..10.min(tx_hash.len())])
+                        }
+                        coordination::CoordinationStatus::Completed { .. } => {
+                            "completed".to_string()
+                        }
+                        coordination::CoordinationStatus::Expired => "expired".to_string(),
+                    };
+                    let initiator_short = &proposal.initiator[..8.min(proposal.initiator.len())];
+                    println!(
+                        "  {} | {} {} -> seeking {} {} | by {} | {}",
+                        proposal.proposal_id,
+                        proposal.amount,
+                        proposal.direction,
+                        proposal.desired_amount,
+                        proposal.desired_direction,
+                        initiator_short,
+                        status_str
+                    );
+                }
             }
         }
         _ => {
@@ -552,6 +754,7 @@ async fn execute_pending_swap(
     swap_client: &SwapClient,
     sim_mode: &SimulationMode,
     archiver: &LogArchiver,
+    coordination_book: &CoordinationBook,
 ) {
     if sim_mode.is_active() {
         let peer_id_str = swarm.local_peer_id().to_string();
@@ -575,6 +778,20 @@ async fn execute_pending_swap(
             &swap.amount_str,
             &tx_hash,
         ));
+
+        // Publish SwapFill if part of a coordinated swap
+        if let Some(ref pid) = swap.proposal_id {
+            let fill_msg = AgentMessage::SwapFill {
+                proposal_id: pid.clone(),
+                executor: peer_id_str.clone(),
+                tx_hash: tx_hash.clone(),
+            };
+            publish_message(swarm, topic, &fill_msg);
+            coordination_book.update_status(
+                pid,
+                coordination::CoordinationStatus::InitiatorExecuted { tx_hash },
+            );
+        }
     } else {
         println!(
             "Executing {} swap: {} {}...",
@@ -614,12 +831,27 @@ async fn execute_pending_swap(
                 if !sim_mode.is_local() {
                     println!("  https://sepolia.etherscan.io/tx/{tx_hash}");
                 }
+
+                // Publish SwapFill if part of a coordinated swap
+                if let Some(ref pid) = swap.proposal_id {
+                    let fill_msg = AgentMessage::SwapFill {
+                        proposal_id: pid.clone(),
+                        executor: swarm.local_peer_id().to_string(),
+                        tx_hash: tx_hash.clone(),
+                    };
+                    publish_message(swarm, topic, &fill_msg);
+                    coordination_book.update_status(
+                        pid,
+                        coordination::CoordinationStatus::InitiatorExecuted { tx_hash },
+                    );
+                }
             }
             Err(e) => println!("Swap failed: {e}"),
         }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_swarm_event(
     event: SwarmEvent<AgentBehaviourEvent>,
     swarm: &mut libp2p::Swarm<network::AgentBehaviour>,
@@ -628,6 +860,7 @@ fn handle_swarm_event(
     peer_registry: &mut PeerRegistry,
     archiver: &LogArchiver,
     reputation_store: &ReputationStore,
+    coordination_book: &CoordinationBook,
 ) {
     match event {
         SwarmEvent::Behaviour(AgentBehaviourEvent::Mdns(mdns::Event::Discovered(list))) => {
@@ -755,6 +988,104 @@ fn handle_swarm_event(
                                     "[IDENTITY] Verification error for {}: {e}",
                                     attested_peer_id
                                 );
+                            }
+                        }
+                    }
+                    AgentMessage::SwapProposal {
+                        proposal_id,
+                        initiator,
+                        direction,
+                        amount,
+                        desired_direction,
+                        desired_amount,
+                        min_reputation,
+                        expires_at,
+                    } => {
+                        // Don't show our own proposals
+                        if initiator != swarm.local_peer_id().to_string() {
+                            let rep_str = min_reputation
+                                .map(|r| format!(" (min-rep: {r:.2})"))
+                                .unwrap_or_default();
+                            println!(
+                                "[PROPOSAL] {proposal_id}: {amount} {direction} seeking {desired_amount} {desired_direction}{rep_str}"
+                            );
+                            println!("  Type 'accept {proposal_id}' to accept.");
+
+                            let proposal = coordination::SwapProposal {
+                                proposal_id,
+                                initiator,
+                                direction,
+                                amount,
+                                desired_direction,
+                                desired_amount,
+                                min_reputation,
+                                expires_at,
+                            };
+                            coordination_book.add_proposal(proposal);
+                        }
+                    }
+                    AgentMessage::SwapAcceptance {
+                        proposal_id,
+                        acceptor,
+                    } => {
+                        if acceptor != swarm.local_peer_id().to_string() {
+                            println!("[ACCEPTED] Proposal {proposal_id} accepted by {acceptor}");
+                            coordination_book.update_status(
+                                &proposal_id,
+                                coordination::CoordinationStatus::Accepted {
+                                    acceptor: acceptor.clone(),
+                                },
+                            );
+
+                            // If we are the initiator, execute our side
+                            if let Some((proposal, _)) = coordination_book.get(&proposal_id) {
+                                if proposal.initiator == swarm.local_peer_id().to_string() {
+                                    let hint = if proposal.direction.contains("TKNA -> TKNB") {
+                                        proposal.amount.clone()
+                                    } else {
+                                        format!("-b {}", proposal.amount)
+                                    };
+                                    println!(
+                                        "[COORD] Counterparty accepted! Execute your swap: swap {hint}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    AgentMessage::SwapFill {
+                        proposal_id,
+                        executor,
+                        tx_hash,
+                    } => {
+                        if executor != swarm.local_peer_id().to_string() {
+                            println!(
+                                "[FILL] Proposal {proposal_id}: {executor} executed tx: {tx_hash}"
+                            );
+
+                            if let Some((_, status)) = coordination_book.get(&proposal_id) {
+                                match status {
+                                    coordination::CoordinationStatus::Accepted { .. } => {
+                                        coordination_book.update_status(
+                                            &proposal_id,
+                                            coordination::CoordinationStatus::InitiatorExecuted {
+                                                tx_hash: tx_hash.clone(),
+                                            },
+                                        );
+                                    }
+                                    coordination::CoordinationStatus::InitiatorExecuted {
+                                        tx_hash: tx_a,
+                                    } => {
+                                        coordination_book.update_status(
+                                            &proposal_id,
+                                            coordination::CoordinationStatus::Completed {
+                                                tx_hash_a: tx_a,
+                                                tx_hash_b: tx_hash.clone(),
+                                            },
+                                        );
+                                        println!("[COORD] Proposal {proposal_id} fully completed!");
+                                    }
+                                    _ => {}
+                                }
                             }
                         }
                     }

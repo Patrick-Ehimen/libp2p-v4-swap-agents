@@ -47,6 +47,28 @@ pub enum AgentMessage {
         max_price: Option<String>,
         timestamp: u64,
     },
+    /// Coordinated swap proposal — seeking a counterparty
+    SwapProposal {
+        proposal_id: String,
+        initiator: String,
+        direction: String,
+        amount: String,
+        desired_direction: String,
+        desired_amount: String,
+        min_reputation: Option<f64>,
+        expires_at: u64,
+    },
+    /// Accept a coordinated swap proposal
+    SwapAcceptance {
+        proposal_id: String,
+        acceptor: String,
+    },
+    /// Signal that one side has executed their swap on-chain
+    SwapFill {
+        proposal_id: String,
+        executor: String,
+        tx_hash: String,
+    },
 }
 
 /// Build gossipsub peer scoring parameters tuned for swap agent network.
