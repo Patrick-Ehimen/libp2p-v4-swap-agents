@@ -17,6 +17,21 @@ pub const MAX_SWAP_COUNT: f64 = 50.0;
 /// Half-life for recency decay in seconds (24 hours).
 pub const RECENCY_HALF_LIFE: f64 = 86400.0;
 
+/// Maximum total penalty deduction from misbehavior.
+pub const MAX_PENALTY: f64 = 0.5;
+
+/// Penalty per invalid/malformed message received from a peer.
+pub const PENALTY_INVALID_MESSAGE: f64 = 0.05;
+
+/// Penalty per intent not followed through with a swap.
+pub const PENALTY_UNFOLLOWED_INTENT: f64 = 0.03;
+
+/// Penalty per expired proposal (created but never executed).
+pub const PENALTY_EXPIRED_PROPOSAL: f64 = 0.02;
+
+/// Peers inactive longer than this (7 days) are eligible for cleanup.
+pub const STALE_PEER_THRESHOLD: u64 = 7 * 86400;
+
 /// Per-peer reputation data, derived from gossipsub messages.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PeerReputation {
@@ -29,6 +44,15 @@ pub struct PeerReputation {
     pub identity_verified: bool,
     /// Unix timestamp of last observed activity (swap or intent).
     pub last_active: u64,
+    /// Count of invalid/malformed messages received from this peer.
+    #[serde(default)]
+    pub invalid_message_count: u64,
+    /// Count of intents not followed through with a swap.
+    #[serde(default)]
+    pub unfollowed_intent_count: u64,
+    /// Count of expired proposals initiated by this peer.
+    #[serde(default)]
+    pub expired_proposal_count: u64,
 }
 
 impl PeerReputation {
@@ -39,10 +63,22 @@ impl PeerReputation {
             intent_count: 0,
             identity_verified: false,
             last_active: 0,
+            invalid_message_count: 0,
+            unfollowed_intent_count: 0,
+            expired_proposal_count: 0,
         }
     }
 
+    /// Compute total penalty deduction from misbehavior. Capped at MAX_PENALTY.
+    pub fn penalty_score(&self) -> f64 {
+        let raw = (self.invalid_message_count as f64 * PENALTY_INVALID_MESSAGE)
+            + (self.unfollowed_intent_count as f64 * PENALTY_UNFOLLOWED_INTENT)
+            + (self.expired_proposal_count as f64 * PENALTY_EXPIRED_PROPOSAL);
+        raw.min(MAX_PENALTY)
+    }
+
     /// Compute normalized composite score in [0.0, 1.0].
+    /// Penalties are subtracted from the base score, clamped to 0.0.
     pub fn composite_score(&self) -> f64 {
         let swap_score = (self.swap_count as f64 / MAX_SWAP_COUNT).min(1.0);
         let identity_score = if self.identity_verified { 1.0 } else { 0.0 };
@@ -53,10 +89,12 @@ impl PeerReputation {
         };
         let recency = self.recency_score();
 
-        WEIGHT_SWAP_COUNT * swap_score
+        let base = WEIGHT_SWAP_COUNT * swap_score
             + WEIGHT_IDENTITY * identity_score
             + WEIGHT_FOLLOW_THROUGH * follow_through
-            + WEIGHT_RECENCY * recency
+            + WEIGHT_RECENCY * recency;
+
+        (base - self.penalty_score()).max(0.0)
     }
 
     /// Exponential decay based on time since last activity.
@@ -238,6 +276,64 @@ impl ReputationStore {
         }
     }
 
+    /// Record an invalid/malformed message from a peer.
+    pub fn record_invalid_message(&self, peer_id: &str) {
+        let mut peers = self.peers.lock().unwrap();
+        let rep = peers
+            .entry(peer_id.to_string())
+            .or_insert_with(|| PeerReputation::new(peer_id.to_string()));
+        rep.invalid_message_count += 1;
+    }
+
+    /// Record an unfollowed intent (intent without subsequent swap).
+    /// Reserved for future intent follow-through tracking with time-window logic.
+    #[allow(dead_code)]
+    pub fn record_unfollowed_intent(&self, peer_id: &str) {
+        let mut peers = self.peers.lock().unwrap();
+        let rep = peers
+            .entry(peer_id.to_string())
+            .or_insert_with(|| PeerReputation::new(peer_id.to_string()));
+        rep.unfollowed_intent_count += 1;
+    }
+
+    /// Record an expired proposal for a peer.
+    pub fn record_expired_proposal(&self, peer_id: &str) {
+        let mut peers = self.peers.lock().unwrap();
+        let rep = peers
+            .entry(peer_id.to_string())
+            .or_insert_with(|| PeerReputation::new(peer_id.to_string()));
+        rep.expired_proposal_count += 1;
+    }
+
+    /// Remove peers that have been inactive for longer than STALE_PEER_THRESHOLD.
+    /// Returns the number of peers removed.
+    pub fn cleanup_stale_peers(&self) -> usize {
+        let now = Self::now_secs();
+        let mut peers = self.peers.lock().unwrap();
+        let stale: Vec<String> = peers
+            .iter()
+            .filter(|(_, rep)| {
+                rep.last_active > 0 && now.saturating_sub(rep.last_active) > STALE_PEER_THRESHOLD
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        let count = stale.len();
+        for id in stale {
+            peers.remove(&id);
+        }
+        count
+    }
+
+    /// Get all peer scores for periodic P5 refresh.
+    pub fn all_scores(&self) -> Vec<(String, f64)> {
+        self.peers
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(id, rep)| (id.clone(), rep.composite_score()))
+            .collect()
+    }
+
     /// Get the reputation for a specific peer.
     #[cfg(test)]
     pub fn get(&self, peer_id: &str) -> Option<PeerReputation> {
@@ -284,14 +380,29 @@ impl ReputationStore {
                 } else {
                     "n/a".to_string()
                 };
+                let penalty_str = if rep.invalid_message_count > 0
+                    || rep.unfollowed_intent_count > 0
+                    || rep.expired_proposal_count > 0
+                {
+                    format!(
+                        " | Penalties: -{:.2} (invalid={}, unfollowed={}, expired={})",
+                        rep.penalty_score(),
+                        rep.invalid_message_count,
+                        rep.unfollowed_intent_count,
+                        rep.expired_proposal_count
+                    )
+                } else {
+                    String::new()
+                };
                 format!(
-                    "Score: {:.2} | Trust: {} | Swaps: {} | Intents: {} | Follow-through: {} | ID: {}",
+                    "Score: {:.2} | Trust: {} | Swaps: {} | Intents: {} | Follow-through: {} | ID: {}{}",
                     score,
                     level,
                     rep.swap_count,
                     rep.intent_count,
                     follow,
-                    if rep.identity_verified { "verified" } else { "unverified" }
+                    if rep.identity_verified { "verified" } else { "unverified" },
+                    penalty_str
                 )
             }
             None => "No reputation data".to_string(),

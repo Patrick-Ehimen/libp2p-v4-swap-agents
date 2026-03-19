@@ -125,6 +125,10 @@ async fn main() -> Result<()> {
     let mut stdin = io::BufReader::new(io::stdin()).lines();
     let mut pending_swap: Option<PendingSwap> = None;
 
+    // Periodic score refresh: every 30 seconds, refresh P5 scores and run cleanup
+    let mut score_refresh_interval = tokio::time::interval(Duration::from_secs(30));
+    score_refresh_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
     loop {
         // If there's a pending swap, give the swarm time to flush the intent first
         if let Some(swap) = pending_swap.take() {
@@ -176,6 +180,9 @@ async fn main() -> Result<()> {
             }
             event = swarm.select_next_some() => {
                 handle_swarm_event(event, &mut swarm, &topic, &attestation_msg, &mut peer_registry, &archiver, &reputation_store, &coordination_book);
+            }
+            _ = score_refresh_interval.tick() => {
+                refresh_peer_scores(&mut swarm, &reputation_store, &coordination_book);
             }
         }
     }
@@ -427,8 +434,13 @@ async fn handle_input(
                 } else {
                     println!("Peer reputations ({}):", all.len());
                     for (pid, rep) in &all {
+                        let penalty_info = if rep.penalty_score() > 0.0 {
+                            format!(" | Penalty: -{:.2}", rep.penalty_score())
+                        } else {
+                            String::new()
+                        };
                         println!(
-                            "  {} — Score: {:.2} | Trust: {} | Swaps: {} | ID: {}",
+                            "  {} — Score: {:.2} | Trust: {} | Swaps: {} | ID: {}{}",
                             pid,
                             rep.composite_score(),
                             rep.trust_level(),
@@ -437,7 +449,8 @@ async fn handle_input(
                                 "verified"
                             } else {
                                 "unverified"
-                            }
+                            },
+                            penalty_info
                         );
                     }
                 }
@@ -880,10 +893,20 @@ fn handle_swarm_event(
         }
         SwarmEvent::Behaviour(AgentBehaviourEvent::Gossipsub(gossipsub::Event::Message {
             propagation_source: peer_id,
+            message_id,
             message,
-            ..
         })) => {
             if let Ok(agent_msg) = serde_json::from_slice::<AgentMessage>(&message.data) {
+                // Valid message — accept for P4 scoring
+                swarm
+                    .behaviour_mut()
+                    .gossipsub
+                    .report_message_validation_result(
+                        &message_id,
+                        &peer_id,
+                        gossipsub::MessageAcceptance::Accept,
+                    )
+                    .ok();
                 match agent_msg {
                     AgentMessage::Chat { content } => {
                         println!("[{peer_id}] {content}");
@@ -1003,6 +1026,15 @@ fn handle_swarm_event(
                     } => {
                         // Don't show our own proposals
                         if initiator != swarm.local_peer_id().to_string() {
+                            // Gate: ignore proposals from completely unknown peers
+                            let initiator_trust = reputation_store.trust_level(&initiator);
+                            if matches!(initiator_trust, reputation::TrustLevel::Unknown) {
+                                println!(
+                                    "[PROPOSAL] Ignored from untrusted peer {}",
+                                    &initiator[..8.min(initiator.len())]
+                                );
+                                return;
+                            }
                             let rep_str = min_reputation
                                 .map(|r| format!(" (min-rep: {r:.2})"))
                                 .unwrap_or_default();
@@ -1029,6 +1061,15 @@ fn handle_swarm_event(
                         acceptor,
                     } => {
                         if acceptor != swarm.local_peer_id().to_string() {
+                            // Gate: ignore acceptances from completely unknown peers
+                            let acceptor_trust = reputation_store.trust_level(&acceptor);
+                            if matches!(acceptor_trust, reputation::TrustLevel::Unknown) {
+                                println!(
+                                    "[ACCEPTED] Ignored from untrusted peer {}",
+                                    &acceptor[..8.min(acceptor.len())]
+                                );
+                                return;
+                            }
                             println!("[ACCEPTED] Proposal {proposal_id} accepted by {acceptor}");
                             coordination_book.update_status(
                                 &proposal_id,
@@ -1091,9 +1132,25 @@ fn handle_swarm_event(
                     }
                 }
             } else {
-                // Fallback: treat as plain text
-                let text = String::from_utf8_lossy(&message.data);
-                println!("[{peer_id}] {text}");
+                // Invalid/malformed message — reject for P4 scoring
+                println!("[INVALID] Malformed message from {peer_id}");
+                swarm
+                    .behaviour_mut()
+                    .gossipsub
+                    .report_message_validation_result(
+                        &message_id,
+                        &peer_id,
+                        gossipsub::MessageAcceptance::Reject,
+                    )
+                    .ok();
+                reputation_store.record_invalid_message(&peer_id.to_string());
+                if let Ok(pid) = peer_id.to_string().parse::<libp2p::PeerId>() {
+                    let app_score = reputation_store.score(&peer_id.to_string()) * 100.0;
+                    swarm
+                        .behaviour_mut()
+                        .gossipsub
+                        .set_application_score(&pid, app_score);
+                }
             }
         }
         SwarmEvent::NewListenAddr { address, .. } => {
@@ -1109,5 +1166,36 @@ fn handle_swarm_event(
             println!("Disconnected from peer: {peer_id}");
         }
         _ => {}
+    }
+}
+
+/// Periodically refresh P5 application scores for all known peers,
+/// clean up stale peers, and penalize initiators of expired proposals.
+fn refresh_peer_scores(
+    swarm: &mut libp2p::Swarm<network::AgentBehaviour>,
+    reputation_store: &ReputationStore,
+    coordination_book: &CoordinationBook,
+) {
+    // Penalize initiators of newly expired proposals
+    let expired_initiators = coordination_book.cleanup_expired_with_initiators();
+    for initiator in &expired_initiators {
+        reputation_store.record_expired_proposal(initiator);
+    }
+
+    // Refresh P5 scores for all peers (decay-aware via composite_score())
+    for (peer_id_str, score) in reputation_store.all_scores() {
+        if let Ok(pid) = peer_id_str.parse::<libp2p::PeerId>() {
+            let app_score = score * 100.0;
+            swarm
+                .behaviour_mut()
+                .gossipsub
+                .set_application_score(&pid, app_score);
+        }
+    }
+
+    // Cleanup stale peers (inactive > 7 days)
+    let stale = reputation_store.cleanup_stale_peers();
+    if stale > 0 {
+        println!("[SCORE] Cleaned up {stale} stale peer(s)");
     }
 }

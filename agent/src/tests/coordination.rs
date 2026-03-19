@@ -205,3 +205,33 @@ fn book_thread_safe() {
 fn proposal_expiry_constant() {
     assert_eq!(PROPOSAL_EXPIRY_SECS, 30);
 }
+
+#[test]
+fn cleanup_expired_with_initiators_returns_ids() {
+    let book = CoordinationBook::new();
+    let mut p1 = sample_proposal("expired1", now_secs() - 1);
+    p1.initiator = "peer_initiator_a".to_string();
+    let mut p2 = sample_proposal("expired2", now_secs() - 1);
+    p2.initiator = "peer_initiator_b".to_string();
+    book.add_proposal(p1);
+    book.add_proposal(p2);
+    book.add_proposal(sample_proposal("active", now_secs() + 60));
+
+    let initiators = book.cleanup_expired_with_initiators();
+    assert_eq!(initiators.len(), 2);
+    assert!(initiators.contains(&"peer_initiator_a".to_string()));
+    assert!(initiators.contains(&"peer_initiator_b".to_string()));
+}
+
+#[test]
+fn cleanup_expired_with_initiators_no_double_count() {
+    let book = CoordinationBook::new();
+    book.add_proposal(sample_proposal("expired1", now_secs() - 1));
+
+    let first = book.cleanup_expired_with_initiators();
+    assert_eq!(first.len(), 1);
+
+    // Second call should find none — already marked Expired
+    let second = book.cleanup_expired_with_initiators();
+    assert_eq!(second.len(), 0);
+}

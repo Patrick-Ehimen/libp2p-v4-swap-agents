@@ -132,6 +132,25 @@ impl CoordinationBook {
         count
     }
 
+    /// Clean up expired proposals and return initiator peer IDs of newly expired ones.
+    /// Unlike `cleanup_expired()`, this only catches proposals transitioning to Expired
+    /// for the first time, preventing double-counting for penalty tracking.
+    pub fn cleanup_expired_with_initiators(&self) -> Vec<String> {
+        let mut book = self.proposals.lock().unwrap();
+        let newly_expired: Vec<(String, String)> = book
+            .iter()
+            .filter(|(_, (p, s))| p.is_expired() && *s != CoordinationStatus::Expired)
+            .map(|(id, (p, _))| (id.clone(), p.initiator.clone()))
+            .collect();
+        let initiators: Vec<String> = newly_expired.iter().map(|(_, init)| init.clone()).collect();
+        for (id, _) in &newly_expired {
+            if let Some(entry) = book.get_mut(id) {
+                entry.1 = CoordinationStatus::Expired;
+            }
+        }
+        initiators
+    }
+
     /// Count of active proposals.
     #[cfg(test)]
     pub fn active_count(&self) -> usize {
