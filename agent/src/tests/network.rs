@@ -168,7 +168,10 @@ fn swap_intent_serialized_json_has_type_tag() {
 fn p4_invalid_message_weight_is_negative() {
     let (params, _) = build_peer_score_params();
     let swap_topic_hash = libp2p::gossipsub::IdentTopic::new(TOPIC).hash();
-    let topic_params = params.topics.get(&swap_topic_hash).expect("swap topic should exist");
+    let topic_params = params
+        .topics
+        .get(&swap_topic_hash)
+        .expect("swap topic should exist");
     assert!(
         topic_params.invalid_message_deliveries_weight < 0.0,
         "P4 weight should be negative to penalize invalid messages"

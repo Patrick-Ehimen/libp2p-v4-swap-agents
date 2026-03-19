@@ -1,6 +1,6 @@
 use crate::reputation::{
-    ConditionResult, PeerReputation, ReputationStore, SwapConditions, TrustLevel,
-    MAX_PENALTY, PENALTY_EXPIRED_PROPOSAL, PENALTY_INVALID_MESSAGE, PENALTY_UNFOLLOWED_INTENT,
+    ConditionResult, PeerReputation, ReputationStore, SwapConditions, TrustLevel, MAX_PENALTY,
+    PENALTY_EXPIRED_PROPOSAL, PENALTY_INVALID_MESSAGE, PENALTY_UNFOLLOWED_INTENT,
     WEIGHT_FOLLOW_THROUGH, WEIGHT_IDENTITY, WEIGHT_RECENCY, WEIGHT_SWAP_COUNT,
 };
 
@@ -347,7 +347,10 @@ fn invalid_message_reduces_score() {
 
     store.record_invalid_message("peer1");
     let after = store.score("peer1");
-    assert!(after < before, "Score should decrease after invalid message");
+    assert!(
+        after < before,
+        "Score should decrease after invalid message"
+    );
 }
 
 #[test]
