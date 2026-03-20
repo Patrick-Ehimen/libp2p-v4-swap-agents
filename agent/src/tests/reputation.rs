@@ -1,5 +1,6 @@
 use crate::reputation::{
-    ConditionResult, PeerReputation, ReputationStore, SwapConditions, TrustLevel,
+    ConditionResult, PeerReputation, ReputationStore, SwapConditions, TrustLevel, MAX_PENALTY,
+    PENALTY_EXPIRED_PROPOSAL, PENALTY_INVALID_MESSAGE, PENALTY_UNFOLLOWED_INTENT,
     WEIGHT_FOLLOW_THROUGH, WEIGHT_IDENTITY, WEIGHT_RECENCY, WEIGHT_SWAP_COUNT,
 };
 
@@ -331,4 +332,129 @@ fn peer_reputation_serialization_roundtrip() {
     assert_eq!(parsed.intent_count, 3);
     assert!(parsed.identity_verified);
     assert_eq!(parsed.last_active, 1700000000);
+}
+
+// --- Misbehavior penalty tests ---
+
+#[test]
+fn invalid_message_reduces_score() {
+    let store = ReputationStore::new();
+    for _ in 0..10 {
+        store.record_swap("peer1");
+    }
+    store.set_identity_verified("peer1", true);
+    let before = store.score("peer1");
+
+    store.record_invalid_message("peer1");
+    let after = store.score("peer1");
+    assert!(
+        after < before,
+        "Score should decrease after invalid message"
+    );
+}
+
+#[test]
+fn penalty_score_capped_at_max() {
+    let mut rep = PeerReputation::new("peer1".to_string());
+    rep.invalid_message_count = 100;
+    let penalty = rep.penalty_score();
+    assert!((penalty - MAX_PENALTY).abs() < f64::EPSILON);
+}
+
+#[test]
+fn composite_score_clamped_at_zero() {
+    let mut rep = PeerReputation::new("peer1".to_string());
+    rep.invalid_message_count = 100;
+    let score = rep.composite_score();
+    assert!(score >= 0.0, "Score should never go below 0.0");
+}
+
+#[test]
+fn multiple_penalty_types_accumulate() {
+    let mut rep = PeerReputation::new("peer1".to_string());
+    rep.invalid_message_count = 1;
+    rep.unfollowed_intent_count = 1;
+    rep.expired_proposal_count = 1;
+    let penalty = rep.penalty_score();
+    let expected = PENALTY_INVALID_MESSAGE + PENALTY_UNFOLLOWED_INTENT + PENALTY_EXPIRED_PROPOSAL;
+    assert!((penalty - expected).abs() < f64::EPSILON);
+}
+
+#[test]
+fn record_invalid_message() {
+    let store = ReputationStore::new();
+    store.record_invalid_message("peer1");
+    store.record_invalid_message("peer1");
+    let rep = store.get("peer1").unwrap();
+    assert_eq!(rep.invalid_message_count, 2);
+}
+
+#[test]
+fn record_unfollowed_intent() {
+    let store = ReputationStore::new();
+    store.record_unfollowed_intent("peer1");
+    let rep = store.get("peer1").unwrap();
+    assert_eq!(rep.unfollowed_intent_count, 1);
+}
+
+#[test]
+fn record_expired_proposal() {
+    let store = ReputationStore::new();
+    store.record_expired_proposal("peer1");
+    let rep = store.get("peer1").unwrap();
+    assert_eq!(rep.expired_proposal_count, 1);
+}
+
+#[test]
+fn cleanup_stale_peers_keeps_recent() {
+    let store = ReputationStore::new();
+    store.record_swap("active_peer");
+    let removed = store.cleanup_stale_peers();
+    assert_eq!(removed, 0, "Recently active peer should not be cleaned up");
+    assert!(store.get("active_peer").is_some());
+}
+
+#[test]
+fn all_scores_returns_correct_data() {
+    let store = ReputationStore::new();
+    store.record_swap("peer1");
+    store.record_swap("peer2");
+    let scores = store.all_scores();
+    assert_eq!(scores.len(), 2);
+    for (_, score) in &scores {
+        assert!(*score >= 0.0);
+        assert!(*score <= 1.0);
+    }
+}
+
+#[test]
+fn penalty_fields_serde_default() {
+    // Simulate deserializing old data without penalty fields
+    let json = r#"{"peer_id":"peer1","swap_count":5,"intent_count":3,"identity_verified":true,"last_active":1700000000}"#;
+    let parsed: PeerReputation = serde_json::from_str(json).unwrap();
+    assert_eq!(parsed.invalid_message_count, 0);
+    assert_eq!(parsed.unfollowed_intent_count, 0);
+    assert_eq!(parsed.expired_proposal_count, 0);
+}
+
+#[test]
+fn penalty_fields_serialization_roundtrip() {
+    let mut rep = PeerReputation::new("peer1".to_string());
+    rep.invalid_message_count = 3;
+    rep.unfollowed_intent_count = 2;
+    rep.expired_proposal_count = 1;
+    let json = serde_json::to_string(&rep).unwrap();
+    let parsed: PeerReputation = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed.invalid_message_count, 3);
+    assert_eq!(parsed.unfollowed_intent_count, 2);
+    assert_eq!(parsed.expired_proposal_count, 1);
+}
+
+#[test]
+fn summary_shows_penalties_when_present() {
+    let store = ReputationStore::new();
+    store.record_invalid_message("peer1");
+    let summary = store.summary("peer1");
+    assert!(summary.contains("Penalties"));
+    assert!(summary.contains("invalid=1"));
 }

@@ -88,6 +88,9 @@ pub fn build_peer_score_params() -> (gossipsub::PeerScoreParams, gossipsub::Peer
         first_message_deliveries_cap: 100.0,
         // P3: disabled — too aggressive for small demo networks (<10 peers)
         mesh_message_deliveries_weight: 0.0,
+        // P4: penalize invalid/malformed messages
+        invalid_message_deliveries_weight: -10.0,
+        invalid_message_deliveries_decay: 0.9,
         ..Default::default()
     };
 
@@ -98,6 +101,11 @@ pub fn build_peer_score_params() -> (gossipsub::PeerScoreParams, gossipsub::Peer
 
     // P5: application-specific score weight (fed by ReputationStore)
     params.app_specific_weight = 10.0;
+
+    // P7: penalize protocol-level misbehavior (re-graft before backoff, IWANT timeout)
+    params.behaviour_penalty_weight = -1.0;
+    params.behaviour_penalty_threshold = 1.0;
+    params.behaviour_penalty_decay = 0.9;
 
     // Lenient thresholds for a demo network
     let thresholds = gossipsub::PeerScoreThresholds {
@@ -131,6 +139,7 @@ pub fn build_swarm() -> Result<Swarm<AgentBehaviour>> {
                 .heartbeat_interval(Duration::from_secs(10))
                 .validation_mode(gossipsub::ValidationMode::Strict)
                 .message_id_fn(message_id_fn)
+                .validate_messages()
                 .build()
                 .map_err(std::io::Error::other)?;
 

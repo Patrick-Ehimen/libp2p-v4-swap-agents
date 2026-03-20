@@ -1,4 +1,4 @@
-use crate::network::{AgentMessage, INTENT_TOPIC, TOPIC};
+use crate::network::{build_peer_score_params, AgentMessage, INTENT_TOPIC, TOPIC};
 
 #[test]
 fn topic_constant() {
@@ -160,4 +160,66 @@ fn swap_intent_serialized_json_has_type_tag() {
     })
     .unwrap();
     assert_eq!(intent["type"], "SwapIntent");
+}
+
+// --- Peer score parameter tests ---
+
+#[test]
+fn p4_invalid_message_weight_is_negative() {
+    let (params, _) = build_peer_score_params();
+    let swap_topic_hash = libp2p::gossipsub::IdentTopic::new(TOPIC).hash();
+    let topic_params = params
+        .topics
+        .get(&swap_topic_hash)
+        .expect("swap topic should exist");
+    assert!(
+        topic_params.invalid_message_deliveries_weight < 0.0,
+        "P4 weight should be negative to penalize invalid messages"
+    );
+}
+
+#[test]
+fn p7_behaviour_penalty_configured() {
+    let (params, _) = build_peer_score_params();
+    assert!(
+        params.behaviour_penalty_weight < 0.0,
+        "P7 behaviour penalty weight should be negative"
+    );
+    assert!(
+        params.behaviour_penalty_decay > 0.0 && params.behaviour_penalty_decay < 1.0,
+        "P7 decay should be between 0 and 1"
+    );
+}
+
+#[test]
+fn p3_remains_disabled() {
+    let (params, _) = build_peer_score_params();
+    let swap_topic_hash = libp2p::gossipsub::IdentTopic::new(TOPIC).hash();
+    let topic_params = params.topics.get(&swap_topic_hash).unwrap();
+    assert_eq!(
+        topic_params.mesh_message_deliveries_weight, 0.0,
+        "P3 should remain disabled for small networks"
+    );
+}
+
+#[test]
+fn p5_weight_is_positive() {
+    let (params, _) = build_peer_score_params();
+    assert!(params.app_specific_weight > 0.0);
+}
+
+#[test]
+fn both_topics_have_score_params() {
+    let (params, _) = build_peer_score_params();
+    let swap_topic = libp2p::gossipsub::IdentTopic::new(TOPIC).hash();
+    let intent_topic = libp2p::gossipsub::IdentTopic::new(INTENT_TOPIC).hash();
+    assert!(params.topics.contains_key(&swap_topic));
+    assert!(params.topics.contains_key(&intent_topic));
+}
+
+#[test]
+fn thresholds_are_ordered() {
+    let (_, thresholds) = build_peer_score_params();
+    assert!(thresholds.gossip_threshold > thresholds.publish_threshold);
+    assert!(thresholds.publish_threshold > thresholds.graylist_threshold);
 }
