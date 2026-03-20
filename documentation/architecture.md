@@ -4,58 +4,41 @@
 
 ```mermaid
 graph TB
-    subgraph APP["APPLICATION LAYER"]
-        CLI["CLI Commands<br/>(main.rs)"]
-        REP["Reputation<br/>Store"]
-        COORD["Coordination<br/>Book"]
-        ARCH["Archival<br/>(Filecoin)"]
+    subgraph APP["Application Layer"]
+        CLI["CLI Commands"]
+        REP["Reputation Store"]
+        COORD["Coordination Book"]
+        ARCH["Archival"]
     end
 
-    subgraph TRUST["TRUST LAYER"]
-        ID["Identity Binding<br/>(EIP-191)"]
-        SCORE["Composite Scoring<br/>(4 factors)"]
-        GATE["Trust-Gated<br/>Execution (cswap)"]
-        LOG["Log Entries"]
+    subgraph TRUST["Trust Layer"]
+        ID["Identity Binding"]
+        SCORE["Composite Scoring"]
+        GATE["Trust-Gated Execution"]
     end
 
-    subgraph NET["NETWORKING LAYER"]
-        subgraph LIBP2P["rust-libp2p 0.54"]
-            subgraph GS["Gossipsub"]
-                T1["v4-swap-agents"]
-                T2["v4-swap-intents"]
-                VAL["Message Validation<br/>(Accept/Reject)"]
-            end
-            MDNS["mDNS Discovery"]
-            PS["Peer Scoring<br/>(P4, P5, P7)"]
-        end
-        HTTP["HTTP Client<br/>(reqwest)"]
-        TRANSPORT["TCP + QUIC · Noise · Yamux"]
+    subgraph NET["Networking Layer - rust-libp2p 0.54"]
+        GS["Gossipsub + mDNS"]
+        PS["Peer Scoring P4/P5/P7"]
+        HTTP["HTTP Client"]
     end
 
-    subgraph EXEC["EXECUTION LAYER"]
-        subgraph ETH["Ethereum (Sepolia / Anvil)"]
-            V1["AgentCounter V1<br/>Swap count · Events"]
-            V2["AgentCounterV2<br/>hookData · Fee rebates"]
-            PM["PoolManager · SwapRouter · Permit2"]
-        end
-        subgraph FIL["Filecoin (Calibration)"]
-            SYN["Synapse SDK<br/>Sidecar"]
-        end
+    subgraph EXEC["Execution Layer"]
+        ETH["Ethereum Sepolia/Anvil\nUniswap V4 Hooks"]
+        FIL["Filecoin Calibration\nSynapse SDK Sidecar"]
     end
 
     CLI --> ID
     CLI --> SCORE
-    CLI --> GATE
-    CLI --> LOG
     REP --> SCORE
     COORD --> GATE
 
     ID --> GS
     SCORE --> PS
-    GATE --> LIBP2P
-    LOG --> HTTP
+    GATE --> GS
+    ARCH --> HTTP
 
-    TRANSPORT --> ETH
+    GS --> ETH
     HTTP --> FIL
 ```
 
@@ -65,20 +48,16 @@ graph TB
 
 ```mermaid
 graph BT
-    IDENTITY["Identity Binding<br/>EIP-191 personal_sign<br/>PeerId ↔ Ethereum EOA<br/>Auto-exchanged on connect<br/>Verified via recover_address"]
+    A["Identity Binding\nEIP-191 personal_sign\nPeerId to Ethereum EOA"]
+    B["Gossipsub Peer Scoring\nP4: Invalid msgs, P5: App score, P7: Behaviour"]
+    C["Composite Reputation\nBase Score minus Penalties\nFinal Score 0.0 to 1.0"]
+    D["Trust Level Mapping\nUnknown / Low / Medium / High / Trusted"]
+    E["Coordination Gate\nUnknown peers blocked\nmin-rep threshold enforced"]
 
-    PEERSCORE["Gossipsub Peer Scoring<br/>P4: Invalid messages (−10.0)<br/>P5: App score (composite)<br/>P7: Behaviour penalty (−1.0)<br/>───────────────<br/>Gossip: −100 · Publish: −200 · Graylist: −400"]
-
-    COMPOSITE["Composite Reputation<br/>Base Score (4 weighted factors)<br/>− Penalty Score (3 deduction types)<br/>= Final Score ∈ [0.0, 1.0]"]
-
-    TRUSTLEVEL["Trust Level Mapping<br/>≤ 0.00 → Unknown<br/>≤ 0.30 → Low<br/>≤ 0.60 → Medium<br/>≤ 0.85 → High<br/>> 0.85 → Trusted"]
-
-    COORDGATE["Coordination Gate<br/>Proposals from Unknown peers → silently ignored<br/>cswap --min-rep threshold checks before execution"]
-
-    IDENTITY --> PEERSCORE
-    PEERSCORE --> COMPOSITE
-    COMPOSITE --> TRUSTLEVEL
-    TRUSTLEVEL --> COORDGATE
+    A --> B
+    B --> C
+    C --> D
+    D --> E
 ```
 
 ---
@@ -87,102 +66,52 @@ graph BT
 
 ```mermaid
 graph TD
-    subgraph INPUTS["Input Signals"]
-        SWAP["SwapExecuted<br/>swap_count++<br/>last_active = now()"]
-        INTENT["SwapIntent<br/>intent_count++<br/>last_active = now()"]
-        IDENT["Identity Attestation<br/>identity_verified = true"]
-    end
+    SWAP["SwapExecuted msgs"] --> F1["Swap Factor\nweight 0.40"]
+    SWAP --> F3["Follow-Through\nweight 0.25"]
+    INTENT["SwapIntent msgs"] --> F3
+    IDENT["Identity Attestation"] --> F2["Identity Factor\nweight 0.20"]
+    SWAP --> F4["Recency Factor\nweight 0.15"]
 
-    subgraph BASE["Base Score Calculation"]
-        F1["Swap Factor (weight: 0.40)<br/>min(swap_count, 50) / 50"]
-        F2["Identity Factor (weight: 0.20)<br/>1.0 if verified, else 0.0"]
-        F3["Follow-Through (weight: 0.25)<br/>swaps / intents (or 1.0)"]
-        F4["Recency Factor (weight: 0.15)<br/>2^(−hours / 24) half-life"]
-        BASESUM["base = Σ(weight_i × factor_i)"]
-    end
-
-    subgraph PENALTY["Penalty Deductions"]
-        P1["Invalid messages × 0.05"]
-        P2["Unfollowed intents × 0.03"]
-        P3["Expired proposals × 0.02"]
-        PCAP["penalty = min(sum, 0.50)"]
-    end
-
-    FINAL["Final Composite Score<br/>score = max(base − penalty, 0.0)<br/>Range: [0.0, 1.0]"]
-
-    TRUST["Trust Level<br/>Classification<br/>Unknown / Low / Medium / High / Trusted"]
-    P5["Gossipsub P5 Feed<br/>Every 30s:<br/>set_application_score(peer, score × 100)"]
-
-    SWAP --> F1
-    SWAP --> F3
-    INTENT --> F3
-    IDENT --> F2
-    SWAP --> F4
-
-    F1 --> BASESUM
+    F1 --> BASESUM["Base Score"]
     F2 --> BASESUM
     F3 --> BASESUM
     F4 --> BASESUM
 
-    P1 --> PCAP
-    P2 --> PCAP
-    P3 --> PCAP
+    INV["Invalid msgs x 0.05"] --> PCAP["Penalty\ncapped at 0.50"]
+    UNF["Unfollowed intents x 0.03"] --> PCAP
+    EXP["Expired proposals x 0.02"] --> PCAP
 
-    BASESUM --> FINAL
+    BASESUM --> FINAL["Final Score\nbase minus penalty\nRange 0.0 to 1.0"]
     PCAP --> FINAL
 
-    FINAL --> TRUST
-    FINAL --> P5
+    FINAL --> TRUST["Trust Level"]
+    FINAL --> P5["Gossipsub P5\nrefreshed every 30s"]
 ```
 
 ---
 
-## 4. Gossipsub Peer Scoring Integration
+## 4. Gossipsub Peer Scoring
 
 ```mermaid
 graph TD
-    MSG["Incoming Gossipsub Message"] --> PARSE["JSON Parse"]
-    TIMER["30-Second Timer"] --> REFRESH["Periodic Refresh"]
+    MSG["Incoming Message"] --> PARSE{"Valid JSON?"}
+    PARSE -->|Yes| ACCEPT["Accept"]
+    PARSE -->|No| REJECT["Reject"]
 
-    PARSE -->|Valid JSON| ACCEPT["Accept<br/>report_message_validation_result"]
-    PARSE -->|Invalid JSON| REJECT["Reject<br/>report_message_validation_result"]
+    REJECT --> P4["P4: -10.0 penalty"]
+    REJECT --> REPPEN["-0.05 reputation"]
 
-    REJECT --> P4["P4 Triggered<br/>weight: −10.0<br/>decay: 0.9"]
-    REJECT --> REPPEN["record_invalid_message()<br/>−0.05 reputation"]
+    TIMER["30s Timer"] --> REFRESH["Refresh P5 scores"]
+    TIMER --> CLEANUP["Cleanup expired + stale"]
 
-    REFRESH --> SCORES["For each peer:<br/>score = composite_score()<br/>P5 = score × 100"]
-    REFRESH --> CLEANUP["Cleanup:<br/>• Expired proposals → penalty<br/>• Stale peers (>7 days) removed"]
+    ACCEPT --> ENGINE["Scoring Engine"]
+    P4 --> ENGINE
+    REFRESH --> ENGINE
 
-    subgraph ENGINE["Gossipsub Scoring Engine"]
-        subgraph TOPIC["Topic Scores (per topic)"]
-            TP1["P1: Time in mesh — weight=0.5, cap=100"]
-            TP2["P2: First delivery — weight=1.0, decay=0.97"]
-            TP3["P3: Mesh delivery — weight=0.0 (disabled)"]
-            TP4["P4: Invalid msgs — weight=−10.0, decay=0.9"]
-        end
-        subgraph PEER["Peer Scores"]
-            PP5["P5: App-specific — weight=10.0<br/>(fed by ReputationStore)"]
-            PP7["P7: Behaviour — weight=−1.0, threshold=1.0"]
-        end
-        subgraph THRESH["Threshold Check"]
-            TH1["> −100 → Can gossip (relay)"]
-            TH2["> −200 → Can publish (send)"]
-            TH3["> −400 → Not graylisted"]
-            TH4["< −400 → GRAYLISTED (muted)"]
-        end
-    end
-
-    ACCEPT --> ENGINE
-    P4 --> TP4
-    SCORES --> PP5
-    CLEANUP --> PP5
-
-    TP1 --> THRESH
-    TP2 --> THRESH
-    TP3 --> THRESH
-    TP4 --> THRESH
-    PP5 --> THRESH
-    PP7 --> THRESH
+    ENGINE --> TH{"Threshold Check"}
+    TH -->|"Above -100"| GOSSIP["Can gossip"]
+    TH -->|"Above -200"| PUBLISH["Can publish"]
+    TH -->|"Below -400"| GRAY["Graylisted"]
 ```
 
 ---
@@ -192,61 +121,39 @@ graph TD
 ```mermaid
 stateDiagram-v2
     [*] --> Pending: propose command
-
-    Pending --> TrustCheck: SwapProposal via gossipsub
+    Pending --> TrustCheck: SwapProposal broadcast
     TrustCheck --> Ignored: Initiator is Unknown
-    TrustCheck --> RepCheck: Initiator has reputation
-
-    RepCheck --> Skipped: My score < min_reputation
-    RepCheck --> Accepted: accept command<br/>SwapAcceptance via gossipsub
-
-    Accepted --> InitiatorExecuted: Initiator executes swap<br/>SwapFill via gossipsub
-
-    InitiatorExecuted --> Completed: Counterparty executes swap<br/>SwapFill via gossipsub
-
-    Pending --> Expired: 30s timeout<br/>Initiator penalized −0.02
-
-    state Pending {
-        [*] --> WaitingForAcceptance
-        note right of WaitingForAcceptance
-            proposal_id generated
-            expires_at = now + 30s
-            min_reputation threshold set
-        end note
-    }
-
-    state Completed {
-        [*] --> Done
-        note right of Done
-            tx_hash_a: initiator tx
-            tx_hash_b: counterparty tx
-        end note
-    }
+    TrustCheck --> RepCheck: Initiator known
+    RepCheck --> Skipped: Score below min_reputation
+    RepCheck --> Accepted: accept command
+    Accepted --> InitiatorExecuted: Initiator swaps on-chain
+    InitiatorExecuted --> Completed: Counterparty swaps on-chain
+    Pending --> Expired: 30s timeout
 ```
 
 ---
 
-## 6. Message Types & Topics
+## 6. Message Types and Topics
 
 ```mermaid
 graph LR
-    subgraph AGENTS_TOPIC["v4-swap-agents topic"]
-        CHAT["Chat<br/>{content}"]
-        SWAPEX["SwapExecuted<br/>{agent, direction,<br/>amount, tx_hash}"]
-        IDATT["IdentityAttestation<br/>{peer_id, eoa, signature}<br/>Auto-sent on connect"]
-        PROPOSAL["SwapProposal<br/>{proposal_id, initiator,<br/>direction, amount,<br/>desired_direction,<br/>desired_amount,<br/>min_reputation, expires_at}"]
-        ACCEPTANCE["SwapAcceptance<br/>{proposal_id, acceptor}"]
-        FILL["SwapFill<br/>{proposal_id, executor,<br/>tx_hash}"]
+    subgraph T1["v4-swap-agents topic"]
+        CHAT["Chat"]
+        SWAPEX["SwapExecuted"]
+        IDATT["IdentityAttestation"]
+        PROPOSAL["SwapProposal"]
+        ACCEPTANCE["SwapAcceptance"]
+        FILL["SwapFill"]
     end
 
-    subgraph INTENTS_TOPIC["v4-swap-intents topic"]
-        SINTENT["SwapIntent<br/>{agent, direction,<br/>amount, min_price,<br/>max_price, timestamp}<br/>Sent 500ms before each swap"]
+    subgraph T2["v4-swap-intents topic"]
+        SINTENT["SwapIntent"]
     end
 
-    A["Agent A"] -->|publishes| AGENTS_TOPIC
-    A -->|publishes| INTENTS_TOPIC
-    AGENTS_TOPIC -->|subscribes| B["Agent B"]
-    INTENTS_TOPIC -->|subscribes| B
+    A["Agent A"] -->|publishes| T1
+    A -->|publishes| T2
+    T1 -->|subscribes| B["Agent B"]
+    T2 -->|subscribes| B
 ```
 
 ---
@@ -255,23 +162,21 @@ graph LR
 
 ```mermaid
 graph TD
-    CMD["User: swap 100"] --> INTENT["Broadcast SwapIntent<br/>via v4-swap-intents"]
-    INTENT --> FLUSH["500ms flush<br/>(PendingSwap pattern)<br/>ensures peers see intent first"]
-    FLUSH --> CHECK{"Check Execution Mode"}
+    CMD["swap 100"] --> INTENT["Broadcast SwapIntent"]
+    INTENT --> FLUSH["500ms flush"]
+    FLUSH --> CHECK{"Execution Mode?"}
 
-    CHECK -->|LIVE| RPC_LIVE["Alloy RPC → Sepolia"]
-    CHECK -->|LOCAL| RPC_LOCAL["Alloy RPC → Anvil<br/>localhost:8545"]
-    CHECK -->|SIMULATE| SIM["Generate synthetic tx hash<br/>0xSIM_{peer_id}_{timestamp}"]
+    CHECK -->|LIVE| SEPOLIA["RPC to Sepolia"]
+    CHECK -->|LOCAL| ANVIL["RPC to Anvil"]
+    CHECK -->|SIMULATE| SIM["Synthetic tx hash"]
 
-    RPC_LIVE --> BROADCAST["Broadcast SwapExecuted<br/>via v4-swap-agents"]
-    RPC_LOCAL --> BROADCAST
+    SEPOLIA --> BROADCAST["Broadcast SwapExecuted"]
+    ANVIL --> BROADCAST
     SIM --> BROADCAST
 
-    BROADCAST --> UPDATE["Update Local State"]
-    UPDATE --> REP["reputation.record_swap()<br/>swap_count++<br/>last_active = now()"]
-    UPDATE --> LOG["archiver.log()<br/>LogEntry::SwapExecuted<br/>→ in-memory buffer"]
-
-    LOG -->|"User: archive"| FILECOIN["POST /upload → sidecar<br/>→ Synapse SDK<br/>→ Filecoin Calibration<br/>Returns: PieceCID"]
+    BROADCAST --> REP["Update reputation"]
+    BROADCAST --> LOG["Buffer log entry"]
+    LOG -->|archive cmd| FIL["Flush to Filecoin"]
 ```
 
 ---
@@ -280,29 +185,17 @@ graph TD
 
 ```mermaid
 graph TD
-    MAIN["main.rs (~1100 LOC)<br/>Event loop · CLI dispatch<br/>Message handling · Score refresh<br/>PendingSwap pattern"]
+    MAIN["main.rs\n~1100 LOC"] --> CLI["cli.rs\n20 LOC"]
+    MAIN --> NET["network.rs\n155 LOC"]
+    MAIN --> SIM["sim.rs\n50 LOC"]
+    MAIN --> UNI["uniswap.rs\n200 LOC"]
+    MAIN --> ARCH["archival.rs\n160 LOC"]
+    MAIN --> ID["identity.rs\n115 LOC"]
+    MAIN --> REP["reputation.rs\n350 LOC"]
+    MAIN --> COORD["coordination.rs\n160 LOC"]
 
-    CLI["cli.rs (20 LOC)<br/>clap arg parser"]
-    NET["network.rs (155 LOC)<br/>Gossipsub · mDNS<br/>AgentMessage · PeerScore"]
-    SIM["sim.rs (50 LOC)<br/>ExecutionMode<br/>Synthetic tx hashes"]
-    UNI["uniswap.rs (200 LOC)<br/>Alloy SwapClient<br/>PoolKeys · ABI"]
-    ARCH["archival.rs (160 LOC)<br/>LogEntry · LogArchiver<br/>Filecoin sidecar"]
-
-    ID["identity.rs (115 LOC)<br/>IdentityBinding<br/>PeerRegistry · EIP-191"]
-    REP["reputation.rs (350 LOC)<br/>PeerReputation · ReputationStore<br/>TrustLevel · SwapConditions<br/>Penalties"]
-    COORD["coordination.rs (160 LOC)<br/>SwapProposal<br/>CoordinationBook<br/>CoordinationStatus"]
-
-    MAIN --> CLI
-    MAIN --> NET
-    MAIN --> SIM
-    MAIN --> UNI
-    MAIN --> ARCH
-    MAIN --> ID
-    MAIN --> REP
-    MAIN --> COORD
-
-    REP -.->|"identity_verified<br/>status"| ID
-    COORD -.->|"expired proposals<br/>→ penalty tracking"| REP
+    REP -.-> ID
+    COORD -.-> REP
 ```
 
 ---
@@ -311,30 +204,28 @@ graph TD
 
 ```mermaid
 sequenceDiagram
-    participant Agent as Agent (Self)
+    participant Agent
     participant GS as Gossipsub
-    participant Peer as Remote Peer
+    participant Peer
 
     Note over Agent: Startup
-    Agent->>Agent: Load PRIVATE_KEY from .env
-    Agent->>Agent: Generate libp2p PeerId (Ed25519)
-    Agent->>Agent: EIP-191 Sign:<br/>msg = "libp2p-v4-swap-agents:identity:{peer_id}"
-    Agent->>Agent: Store IdentityBinding<br/>{peer_id, eoa, signature}
+    Agent->>Agent: Load PRIVATE_KEY
+    Agent->>Agent: Generate PeerId
+    Agent->>Agent: EIP-191 Sign identity msg
+    Agent->>Agent: Store IdentityBinding
 
     Note over Agent,Peer: On ConnectionEstablished
-    Agent->>GS: Publish IdentityAttestation<br/>{peer_id, eoa, signature}
-    GS->>Peer: Deliver IdentityAttestation
+    Agent->>GS: Publish IdentityAttestation
+    GS->>Peer: Deliver attestation
 
     Note over Peer: Verification
-    Peer->>Peer: Reconstruct IdentityBinding
-    Peer->>Peer: Verify: recovered = recover_address_from_msg(msg, sig)
+    Peer->>Peer: recover_address_from_msg
 
-    alt Signature Valid (recovered == claimed EOA)
+    alt Valid signature
         Peer->>Peer: Register in PeerRegistry
-        Peer->>Peer: reputation.set_identity_verified(peer_id, true)
-        Note over Peer: Identity factor → 1.0 (20% of score)
-    else Signature Invalid
-        Peer->>Peer: Log warning, do not register
+        Peer->>Peer: set_identity_verified true
+    else Invalid signature
+        Peer->>Peer: Log warning
     end
 ```
 
@@ -344,35 +235,31 @@ sequenceDiagram
 
 ```mermaid
 sequenceDiagram
-    participant User as User CLI
-    participant Agent as Agent A
-    participant GS as Gossipsub Network
-    participant Peers as Peer Agents
-    participant ETH as Uniswap V4<br/>(Sepolia)
-    participant FIL as Filecoin<br/>(Sidecar)
+    participant User
+    participant Agent
+    participant GS as Gossipsub
+    participant Peers
+    participant ETH as Uniswap V4
+    participant FIL as Filecoin
 
     User->>Agent: swap 100
-    Agent->>GS: 1. SwapIntent {amount: 100, direction: a2b}
-    GS->>Peers: [INTENT] Agent wants to swap 100 TKNA→TKNB
+    Agent->>GS: SwapIntent
+    GS->>Peers: INTENT broadcast
 
-    Note over Agent: 500ms flush (PendingSwap pattern)
+    Note over Agent: 500ms flush
 
-    Agent->>ETH: 2. Alloy RPC → SwapRouter.swap()
-    ETH-->>Agent: tx_hash: 0xabc...
+    Agent->>ETH: SwapRouter.swap
+    ETH-->>Agent: tx_hash
 
-    Agent->>GS: 3. SwapExecuted {tx_hash, amount, direction}
-    GS->>Peers: [SWAP] Agent executed 100 TKNA→TKNB tx: 0xabc...
+    Agent->>GS: SwapExecuted
+    GS->>Peers: SWAP broadcast
 
-    par Update Local State
-        Agent->>Agent: 4. reputation.record_swap()<br/>swap_count++, last_active = now()
-        Agent->>Agent: 5. archiver.log(LogEntry::SwapExecuted)
-    end
+    Agent->>Agent: Update reputation
+    Agent->>Agent: Buffer log entry
 
-    Note over User,Agent: Later...
     User->>Agent: archive
-    Agent->>FIL: 6. POST /upload (JSON array of log entries)
-    FIL-->>Agent: PieceCID: baf...
-    Agent->>User: Archived to Filecoin: baf...
+    Agent->>FIL: POST /upload
+    FIL-->>Agent: PieceCID
 ```
 
 ---
@@ -381,36 +268,29 @@ sequenceDiagram
 
 ```mermaid
 sequenceDiagram
-    participant A as Agent A (Initiator)
+    participant A as Initiator
     participant GS as Gossipsub
-    participant B as Agent B (Counterparty)
+    participant B as Counterparty
 
-    Note over A: propose 100 a2b 50 b2a --min-rep 0.3
+    Note over A: propose 100 a2b 50 b2a
 
-    A->>GS: SwapProposal {id, offer: 100 a2b, seek: 50 b2a, min_rep: 0.3}
+    A->>GS: SwapProposal
     GS->>B: Receive proposal
 
-    Note over B: Trust check: Is A Unknown?
-    Note over B: Rep check: My score ≥ 0.3?
+    Note over B: Trust + rep check
 
-    B->>GS: SwapAcceptance {proposal_id, acceptor: B}
+    B->>GS: SwapAcceptance
     GS->>A: Receive acceptance
 
-    Note over A: Status: Pending → Accepted
+    A->>A: Execute swap on-chain
+    A->>GS: SwapFill tx_hash_a
+    GS->>B: Receive fill
 
-    A->>A: Execute swap on-chain (100 a2b)
-    A->>GS: SwapFill {proposal_id, tx_hash_a}
-    GS->>B: Receive fill from A
+    B->>B: Execute counter-swap
+    B->>GS: SwapFill tx_hash_b
+    GS->>A: Receive fill
 
-    Note over A: Status: Accepted → InitiatorExecuted
-
-    B->>B: Execute counter-swap on-chain (50 b2a)
-    B->>GS: SwapFill {proposal_id, tx_hash_b}
-    GS->>A: Receive fill from B
-
-    Note over A: Status: InitiatorExecuted → Completed
-
-    Note over A,B: Both swaps executed successfully
+    Note over A,B: Completed
 ```
 
 ---
@@ -419,19 +299,12 @@ sequenceDiagram
 
 ```mermaid
 graph TD
-    TIMER["30-Second Interval Timer"] --> START["refresh_peer_scores()"]
+    TIMER["30s Timer"] --> SCORES["Feed P5 scores\ncomposite x 100"]
+    TIMER --> EXPIRED["Cleanup expired proposals\npenalize initiators -0.02"]
+    TIMER --> STALE["Remove stale peers\ninactive over 7 days"]
 
-    START --> ITER["Iterate reputation_store.all_scores()"]
-    ITER --> P5["For each (peer_id, score):<br/>gossipsub.set_application_score(peer_id, score × 100)"]
-
-    START --> EXPIRED["coordination_book.cleanup_expired_with_initiators()"]
-    EXPIRED --> PENALIZE["For each expired initiator:<br/>reputation_store.record_expired_proposal(peer_id)<br/>−0.02 per occurrence"]
-
-    START --> STALE["reputation_store.cleanup_stale_peers()"]
-    STALE --> PRUNE["Remove peers inactive > 7 days"]
-
-    P5 --> DONE["Cycle Complete<br/>Wait 30s"]
-    PENALIZE --> DONE
-    PRUNE --> DONE
+    SCORES --> DONE["Wait 30s"]
+    EXPIRED --> DONE
+    STALE --> DONE
     DONE --> TIMER
 ```
