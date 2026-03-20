@@ -10,3 +10,6 @@
 [submodule "contracts/lib/hookmate"]
 	path = contracts/lib/hookmate
 	url = https://github.com/akshatmittal/hookmate
+[submodule "contracts/lib/forge-std"]
+	path = contracts/lib/forge-std
+	url = https://github.com/foundry-rs/forge-std
