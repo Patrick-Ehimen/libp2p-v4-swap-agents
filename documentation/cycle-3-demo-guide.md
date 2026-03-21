@@ -214,8 +214,9 @@ peers
 
 Expected output:
 ```
-Verified peers (1):
-  12D3KooW... -> 0x817c... [Trust: Unknown | Score: 0.00]
+Verified peers (2):
+  12D3KooW... -> 0x817c... [Trust: Low | Score: 0.35]
+  12D3KooW... -> 0xf39F... [Trust: Low | Score: 0.35]
 ```
 
 **Key points:**
@@ -275,19 +276,24 @@ swap 1
 swap 1
 ```
 
-**Check reputation in Agent B:**
+**Check reputation in Agent A (own score):**
 ```bash
 reputation
 ```
 
 Expected output:
 ```
-Peer reputations (1):
-  12D3KooW... — Score: 0.41 | Trust: Medium | Swaps: 3 | ID: unverified
+Peer reputations (2):
+  12D3KooW... — Score: 0.50 | Trust: Medium | Swaps: 3 | ID: verified
+  12D3KooW... — Score: 0.35 | Trust: Low | Swaps: 0 | ID: verified
 ```
 
+Agents track their own activity — the first entry is Agent A's self-score including its 3 swaps and verified identity. The second entry is Agent B as seen by Agent A.
+
 **Key points:**
+- Agents track their own swaps, intents, and identity verification locally
 - Composite score: swap count (40%), identity (20%), follow-through (25%), recency (15%)
+- Follow-through is 0.0 when no activity exists (no free credit for new peers)
 - Trust levels: Unknown (<=0), Low (<=0.3), Medium (<=0.6), High (<=0.85), Trusted (>0.85)
 - Misbehavior penalties subtract from score (invalid messages, unfollowed intents, expired proposals)
 - Penalties are capped at 0.5 to prevent permanent blacklisting
@@ -297,38 +303,40 @@ Peer reputations (1):
 
 ### Demo 6: Conditional Swaps (Reputation-Gated)
 
-**What this shows**: Swaps can require minimum peer reputation before execution.
+**What this shows**: Swaps can require minimum peer reputation before execution. The `cswap` command checks the agent's **own** reputation score against the threshold before executing.
 
-**In Agent B — attempt a conditional swap with threshold:**
+**In Agent A — attempt a conditional swap with a high threshold:**
 ```bash
-cswap 1 a2b --min-rep 0.01
+cswap 1 a2b --min-rep 0.9
 ```
 
-If reputation is too low:
+Rejected because own score (~0.35 on startup) is below threshold:
 ```
-[CSWAP] REJECTED: Reputation too low: 0.00 < 0.01 threshold
+[CSWAP] REJECTED: Reputation too low: 0.35 < 0.90 threshold
 ```
 
-**Build reputation first:**
+**Build reputation by executing swaps:**
 ```bash
 swap 1
 swap 1
+swap 1
 ```
 
-**Try again:**
+**Try with a reasonable threshold:**
 ```bash
-cswap 1 a2b --min-rep 0.01
+cswap 1 a2b --min-rep 0.3
 ```
 
 Expected output:
 ```
-[CSWAP] Conditions met — executing swap
+[CSWAP] Conditions met, executing...
 [SIM] V1 swap: 1 TKNA -> TKNB
 [SIM] tx: 0xSIM_...
 ```
 
 **Key points:**
-- `--min-rep` sets minimum reputation threshold (0.0 to 1.0)
+- `--min-rep` sets minimum own-reputation threshold (0.0 to 1.0)
+- Agents start with ~0.35 score (identity verified + recency), so low thresholds pass immediately
 - Optional `--min-price` and `--max-price` for price bounds
 - Rejection is logged with specific reason
 - Threshold is configurable per swap
@@ -381,27 +389,31 @@ Active proposals (1):
 
 ### Demo 8: Trust Gating & Peer Scoring
 
-**What this shows**: Unknown peers are blocked from coordination. Gossipsub scoring integrates with reputation.
+**What this shows**: Unknown peers (those without verified identity) are blocked from coordination. Gossipsub scoring integrates with reputation.
 
-**Start a fresh Agent C with no swap history:**
+Once Agent C connects and its identity attestation is verified, it starts at TrustLevel::Low (~0.35 score). Trust gating blocks `TrustLevel::Unknown` peers — those whose identity attestation has not yet been verified or who have accumulated enough penalties to drop to zero.
+
+**To demonstrate trust gating**, you can set a high `--min-rep` threshold on proposals:
+
+**Agent A proposes with high reputation gate:**
 ```bash
-# Terminal 3
-cd agent
-cargo run -- --simulate /ip4/127.0.0.1/tcp/<PORT>
+propose 1 a2b 1 --min-rep 0.5
 ```
 
-**Agent C proposes:**
+**Agent C (fresh, score ~0.35) tries to accept:**
 ```bash
-propose 1 a2b 1
+accept prop_XXXXX
 ```
 
-**Agent A sees:**
+**Agent C sees:**
 ```
-[PROPOSAL] Ignored from untrusted peer 12D3KooW
+[ACCEPT] Cannot accept: your reputation 0.35 < required 0.50
 ```
 
 **Key points:**
 - Proposals and acceptances from `TrustLevel::Unknown` peers are silently ignored
+- Fresh peers with verified identity start at ~0.35 (Low trust), not Unknown
+- `--min-rep` on proposals gates which peers can accept
 - Gossipsub P4 penalizes peers sending invalid messages (weight: -10.0)
 - P5 application score fed by composite reputation every 30 seconds
 - P7 behaviour penalty for general misbehavior (weight: -1.0)
@@ -495,12 +507,12 @@ intent 5 a2b 0.95 1.05
 swap 1
 swap 1
 swap 1
-reputation    # Check scores — should see Medium trust
+reputation    # Check scores — own score should be ~0.50 (Medium trust)
 ```
 
 **Step 4 — Conditional swap**
 ```bash
-cswap 2 a2b --min-rep 0.01
+cswap 2 a2b --min-rep 0.3
 ```
 
 **Step 5 — Coordinated swap**
@@ -559,7 +571,7 @@ peers         # Trust levels reflect swap history
 
 ### Part 3: Reputation & Trust (60 seconds)
 
-"After three swaps, Agent A has built a reputation score of 0.41 — Medium trust. The score is a composite of swap count, identity verification, follow-through rate, and recency."
+"Agents start with a score of about 0.35 from identity verification alone. After three swaps, Agent A builds to about 0.50 — Medium trust. The score is a composite of swap count, identity verification, follow-through rate, and recency."
 
 **[Execute 3 swaps, run reputation on Agent B]**
 
@@ -632,13 +644,14 @@ mDNS error on non-routable network interfaces. Harmless — agents still connect
 - Proposals expire after 60 seconds
 
 ### Reputation score is 0.00
-- New peers start with zero reputation
-- Execute swaps to build reputation
-- Identity verification adds 0.20 bonus (check `peers` for verification status)
+- Peers without verified identity start at 0.00 (Unknown trust)
+- Once identity is verified, agents start at ~0.35 (identity + recency)
+- Execute swaps to increase score further
 
 ### Conditional swap always rejected
-- Check your current reputation with `reputation`
-- Lower the `--min-rep` threshold or execute more swaps first
+- The `cswap` command checks your **own** reputation score, not a peer's
+- Check your current score with `reputation` — find your own PeerId entry
+- Lower the `--min-rep` threshold or execute more swaps to build your score
 
 ### Archival fails with connection error
 - Ensure sidecar is running: `cd sidecar && npm start`

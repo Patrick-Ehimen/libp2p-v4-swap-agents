@@ -82,8 +82,10 @@ impl PeerReputation {
     pub fn composite_score(&self) -> f64 {
         let swap_score = (self.swap_count as f64 / MAX_SWAP_COUNT).min(1.0);
         let identity_score = if self.identity_verified { 1.0 } else { 0.0 };
-        let follow_through = if self.intent_count == 0 {
-            1.0 // no intents = neutral, not penalized
+        let follow_through = if self.intent_count == 0 && self.swap_count == 0 {
+            0.0 // no activity = no credit
+        } else if self.intent_count == 0 {
+            1.0 // swaps without intents = full credit
         } else {
             (self.swap_count as f64 / self.intent_count as f64).min(1.0)
         };

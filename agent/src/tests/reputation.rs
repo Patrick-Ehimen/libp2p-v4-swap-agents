@@ -16,10 +16,10 @@ fn new_peer_has_zero_score() {
     assert_eq!(rep.swap_count, 0);
     assert_eq!(rep.intent_count, 0);
     assert!(!rep.identity_verified);
-    // Only follow-through contributes (neutral = 1.0 * 0.25 = 0.25),
-    // but recency is 0 (no activity), so score = 0.25
+    // No activity at all (swap_count == 0 && intent_count == 0) → follow_through = 0.0,
+    // recency is 0 (no activity), so score = 0.0
     let score = rep.composite_score();
-    assert!((score - WEIGHT_FOLLOW_THROUGH).abs() < 0.01);
+    assert!((score - 0.0).abs() < 0.01);
 }
 
 #[test]
@@ -80,10 +80,20 @@ fn follow_through_ratio_poor() {
 
 #[test]
 fn no_intents_gives_neutral_follow_through() {
-    let rep = PeerReputation::new("peer1".to_string());
-    // intent_count == 0 → follow_through = 1.0 (neutral)
+    // When swap_count > 0 but intent_count == 0, follow_through = 1.0 (full credit)
+    let mut rep = PeerReputation::new("peer1".to_string());
+    rep.swap_count = 5;
+    rep.last_active = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
     let score = rep.composite_score();
+    // Should include follow_through component (0.25)
     assert!(score >= WEIGHT_FOLLOW_THROUGH - 0.01);
+
+    // When both are 0, follow_through = 0.0 (no credit for no activity)
+    let empty = PeerReputation::new("peer2".to_string());
+    assert!((empty.composite_score() - 0.0).abs() < 0.01);
 }
 
 #[test]

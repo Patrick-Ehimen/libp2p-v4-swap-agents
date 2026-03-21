@@ -109,6 +109,8 @@ async fn main() -> Result<()> {
     let mut peer_registry = PeerRegistry::new();
     peer_registry.register(own_binding);
     let reputation_store = ReputationStore::new();
+    // Record own identity so the local agent's reputation reflects its verified status
+    reputation_store.set_identity_verified(&peer_id_str, true);
     let coordination_book = CoordinationBook::new();
 
     // Dial a remote peer if provided as CLI argument
@@ -167,6 +169,7 @@ async fn main() -> Result<()> {
                 &sim_mode,
                 &archiver,
                 &coordination_book,
+                &reputation_store,
             )
             .await;
             continue;
@@ -290,6 +293,7 @@ async fn handle_input(
                     .as_secs(),
             };
             publish_message(swarm, intent_topic, &intent_msg);
+            reputation_store.record_intent(&swarm.local_peer_id().to_string());
             println!("[INTENT] Broadcast: {amount_str} {direction}");
 
             return Some(PendingSwap {
@@ -346,6 +350,7 @@ async fn handle_input(
                             .as_secs(),
                     };
                     publish_message(swarm, intent_topic, &msg);
+                    reputation_store.record_intent(&swarm.local_peer_id().to_string());
                     let bounds = match (min_price, max_price) {
                         (Some(min), Some(max)) => format!(" (bounds: {min}-{max})"),
                         (Some(min), None) => format!(" (min: {min})"),
@@ -512,6 +517,7 @@ async fn handle_input(
                         .as_secs(),
                 };
                 publish_message(swarm, intent_topic, &intent_msg);
+                reputation_store.record_intent(&swarm.local_peer_id().to_string());
 
                 let mut cond_parts = Vec::new();
                 if let Some(rep) = conditions.min_reputation {
@@ -760,6 +766,7 @@ fn publish_message(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_pending_swap(
     swap: &PendingSwap,
     topic: &gossipsub::IdentTopic,
@@ -768,6 +775,7 @@ async fn execute_pending_swap(
     sim_mode: &SimulationMode,
     archiver: &LogArchiver,
     coordination_book: &CoordinationBook,
+    reputation_store: &ReputationStore,
 ) {
     if sim_mode.is_active() {
         let peer_id_str = swarm.local_peer_id().to_string();
@@ -785,6 +793,7 @@ async fn execute_pending_swap(
             tx_hash: tx_hash.clone(),
         };
         publish_message(swarm, topic, &msg);
+        reputation_store.record_swap(&peer_id_str);
         archiver.log(LogEntry::swap_executed(
             &peer_id_str,
             &swap.direction,
@@ -834,6 +843,7 @@ async fn execute_pending_swap(
                     tx_hash: tx_hash.clone(),
                 };
                 publish_message(swarm, topic, &msg);
+                reputation_store.record_swap(&swarm.local_peer_id().to_string());
                 println!("Swap complete! tx: {tx_hash}");
                 archiver.log(LogEntry::swap_executed(
                     &swarm.local_peer_id().to_string(),

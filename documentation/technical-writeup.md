@@ -88,9 +88,9 @@ Agent A                          Agent B
 
 | Factor | Weight | Description |
 |--------|--------|-------------|
-| Swap Count | 0.40 | `min(swap_count, 10) / 10` — normalized successful swap history |
+| Swap Count | 0.40 | `min(swap_count, 50) / 50` — normalized successful swap history |
 | Identity Verified | 0.20 | Binary — 1.0 if PeerId <-> EOA binding verified, 0.0 otherwise |
-| Follow-Through Rate | 0.25 | `successful_swaps / (successful_swaps + failed_swaps)` |
+| Follow-Through Rate | 0.25 | `swap_count / intent_count` — 0.0 when no activity, 1.0 when swaps exist without intents |
 | Recency | 0.15 | `2^(-hours_since_last_swap / 24)` — 24-hour half-life decay |
 
 **Composite score** = `(w1*swap + w2*identity + w3*follow_through + w4*recency) - penalty_score`
