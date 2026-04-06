@@ -69,6 +69,30 @@ pub enum AgentMessage {
         executor: String,
         tx_hash: String,
     },
+    /// Request a quote from peers for a swap
+    QuoteRequest {
+        quote_id: String,
+        requester: String,
+        direction: String,
+        amount: String,
+        min_reputation: Option<f64>,
+        expires_at: u64,
+    },
+    /// Respond to a quote request with terms
+    QuoteResponse {
+        response_id: String,
+        quote_id: String,
+        responder: String,
+        offered_amount: String,
+        price: String,
+        expires_at: u64,
+    },
+    /// Accept a specific quote response (triggers execution)
+    QuoteAccept {
+        quote_id: String,
+        response_id: String,
+        acceptor: String,
+    },
 }
 
 /// Build gossipsub peer scoring parameters tuned for swap agent network.
