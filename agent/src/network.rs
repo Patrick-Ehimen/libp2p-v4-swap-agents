@@ -45,6 +45,10 @@ pub enum AgentMessage {
         amount: String,
         min_price: Option<String>,
         max_price: Option<String>,
+        /// Maximum acceptable slippage in basis points (100 bps = 1%).
+        /// Signals to peers how sensitive this agent is to adverse execution.
+        #[serde(default)]
+        max_slippage_bps: Option<u64>,
         timestamp: u64,
     },
     /// Coordinated swap proposal — seeking a counterparty
@@ -92,6 +96,25 @@ pub enum AgentMessage {
         quote_id: String,
         response_id: String,
         acceptor: String,
+    },
+    /// MEV alert — broadcast when a swap's realized slippage exceeds the sandwich threshold.
+    /// Peers use this to build a network-wide picture of execution quality.
+    MevAlert {
+        /// PeerId of the agent reporting the event.
+        reporter: String,
+        /// Swap direction (e.g. "TKNA -> TKNB").
+        direction: String,
+        /// Input amount (human-readable, e.g. "100").
+        amount_in: String,
+        /// amountOutMin enforced on-chain (wei, as decimal string).
+        amount_out_min: String,
+        /// Actual output received (wei, as decimal string).
+        actual_out: String,
+        /// Realized slippage in basis points.
+        realized_slippage_bps: u64,
+        /// True if slippage exceeded the sandwich detection threshold.
+        sandwich_detected: bool,
+        timestamp: u64,
     },
 }
 
