@@ -162,6 +162,148 @@ fn swap_intent_serialized_json_has_type_tag() {
     assert_eq!(intent["type"], "SwapIntent");
 }
 
+// --- Quote message roundtrip tests ---
+
+#[test]
+fn quote_request_roundtrip() {
+    let msg = AgentMessage::QuoteRequest {
+        quote_id: "quote_abc_123".into(),
+        requester: "peer1".into(),
+        direction: "TKNA -> TKNB".into(),
+        amount: "100".into(),
+        min_reputation: Some(0.5),
+        expires_at: 1700000000,
+    };
+    let json = serde_json::to_string(&msg).unwrap();
+    let decoded: AgentMessage = serde_json::from_str(&json).unwrap();
+    match decoded {
+        AgentMessage::QuoteRequest {
+            quote_id,
+            requester,
+            direction,
+            amount,
+            min_reputation,
+            expires_at,
+        } => {
+            assert_eq!(quote_id, "quote_abc_123");
+            assert_eq!(requester, "peer1");
+            assert_eq!(direction, "TKNA -> TKNB");
+            assert_eq!(amount, "100");
+            assert_eq!(min_reputation, Some(0.5));
+            assert_eq!(expires_at, 1700000000);
+        }
+        _ => panic!("wrong variant"),
+    }
+}
+
+#[test]
+fn quote_request_optional_min_reputation_none() {
+    let msg = AgentMessage::QuoteRequest {
+        quote_id: "q1".into(),
+        requester: "peer1".into(),
+        direction: "TKNA -> TKNB".into(),
+        amount: "50".into(),
+        min_reputation: None,
+        expires_at: 1700000000,
+    };
+    let json = serde_json::to_string(&msg).unwrap();
+    let decoded: AgentMessage = serde_json::from_str(&json).unwrap();
+    match decoded {
+        AgentMessage::QuoteRequest { min_reputation, .. } => {
+            assert!(min_reputation.is_none());
+        }
+        _ => panic!("wrong variant"),
+    }
+}
+
+#[test]
+fn quote_response_roundtrip() {
+    let msg = AgentMessage::QuoteResponse {
+        response_id: "resp_xyz_456".into(),
+        quote_id: "quote_abc_123".into(),
+        responder: "peer2".into(),
+        offered_amount: "98".into(),
+        price: "0.98".into(),
+        expires_at: 1700000030,
+    };
+    let json = serde_json::to_string(&msg).unwrap();
+    let decoded: AgentMessage = serde_json::from_str(&json).unwrap();
+    match decoded {
+        AgentMessage::QuoteResponse {
+            response_id,
+            quote_id,
+            responder,
+            offered_amount,
+            price,
+            expires_at,
+        } => {
+            assert_eq!(response_id, "resp_xyz_456");
+            assert_eq!(quote_id, "quote_abc_123");
+            assert_eq!(responder, "peer2");
+            assert_eq!(offered_amount, "98");
+            assert_eq!(price, "0.98");
+            assert_eq!(expires_at, 1700000030);
+        }
+        _ => panic!("wrong variant"),
+    }
+}
+
+#[test]
+fn quote_accept_roundtrip() {
+    let msg = AgentMessage::QuoteAccept {
+        quote_id: "quote_abc_123".into(),
+        response_id: "resp_xyz_456".into(),
+        acceptor: "peer1".into(),
+    };
+    let json = serde_json::to_string(&msg).unwrap();
+    let decoded: AgentMessage = serde_json::from_str(&json).unwrap();
+    match decoded {
+        AgentMessage::QuoteAccept {
+            quote_id,
+            response_id,
+            acceptor,
+        } => {
+            assert_eq!(quote_id, "quote_abc_123");
+            assert_eq!(response_id, "resp_xyz_456");
+            assert_eq!(acceptor, "peer1");
+        }
+        _ => panic!("wrong variant"),
+    }
+}
+
+#[test]
+fn quote_messages_serialized_json_has_type_tags() {
+    let qr = serde_json::to_value(&AgentMessage::QuoteRequest {
+        quote_id: "q".into(),
+        requester: "p".into(),
+        direction: "d".into(),
+        amount: "1".into(),
+        min_reputation: None,
+        expires_at: 0,
+    })
+    .unwrap();
+    assert_eq!(qr["type"], "QuoteRequest");
+
+    let qresp = serde_json::to_value(&AgentMessage::QuoteResponse {
+        response_id: "r".into(),
+        quote_id: "q".into(),
+        responder: "p".into(),
+        offered_amount: "1".into(),
+        price: "1".into(),
+        expires_at: 0,
+    })
+    .unwrap();
+    assert_eq!(qresp["type"], "QuoteResponse");
+
+    let qa = serde_json::to_value(&AgentMessage::QuoteAccept {
+        quote_id: "q".into(),
+        response_id: "r".into(),
+        acceptor: "p".into(),
+    })
+    .unwrap();
+    assert_eq!(qa["type"], "QuoteAccept");
+}
+
 // --- Peer score parameter tests ---
 
 #[test]

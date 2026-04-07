@@ -3,6 +3,7 @@ mod cli;
 mod coordination;
 mod identity;
 mod network;
+mod quotes;
 mod reputation;
 mod sim;
 mod uniswap;
@@ -27,6 +28,7 @@ use cli::Cli;
 use coordination::CoordinationBook;
 use identity::{IdentityBinding, PeerRegistry};
 use network::{AgentBehaviourEvent, AgentMessage, INTENT_TOPIC, TOPIC};
+use quotes::QuoteBook;
 use reputation::ReputationStore;
 use sim::SimulationMode;
 use uniswap::SwapClient;
@@ -112,6 +114,7 @@ async fn main() -> Result<()> {
     // Record own identity so the local agent's reputation reflects its verified status
     reputation_store.set_identity_verified(&peer_id_str, true);
     let coordination_book = CoordinationBook::new();
+    let quote_book = QuoteBook::new();
 
     // Dial a remote peer if provided as CLI argument
     if let Some(addr) = cli.dial {
@@ -140,7 +143,7 @@ async fn main() -> Result<()> {
             loop {
                 tokio::select! {
                     event = swarm.select_next_some() => {
-                        handle_swarm_event(event, &mut swarm, &topic, &attestation_msg, &mut peer_registry, &archiver, &reputation_store, &coordination_book);
+                        handle_swarm_event(event, &mut swarm, &topic, &attestation_msg, &mut peer_registry, &archiver, &reputation_store, &coordination_book, &quote_book);
                     }
                     _ = &mut flush_deadline => break,
                 }
@@ -178,14 +181,14 @@ async fn main() -> Result<()> {
         tokio::select! {
             line = stdin.next_line() => {
                 if let Ok(Some(line)) = line {
-                    pending_swap = handle_input(&line, &topic, &intent_topic, &mut swarm, &swap_client, &peer_registry, &sim_mode, &archiver, &reputation_store, &coordination_book).await;
+                    pending_swap = handle_input(&line, &topic, &intent_topic, &mut swarm, &swap_client, &peer_registry, &sim_mode, &archiver, &reputation_store, &coordination_book, &quote_book).await;
                 }
             }
             event = swarm.select_next_some() => {
-                handle_swarm_event(event, &mut swarm, &topic, &attestation_msg, &mut peer_registry, &archiver, &reputation_store, &coordination_book);
+                handle_swarm_event(event, &mut swarm, &topic, &attestation_msg, &mut peer_registry, &archiver, &reputation_store, &coordination_book, &quote_book);
             }
             _ = score_refresh_interval.tick() => {
-                refresh_peer_scores(&mut swarm, &reputation_store, &coordination_book);
+                refresh_peer_scores(&mut swarm, &reputation_store, &coordination_book, &quote_book);
             }
         }
     }
@@ -215,6 +218,7 @@ async fn handle_input(
     archiver: &LogArchiver,
     reputation_store: &ReputationStore,
     coordination_book: &CoordinationBook,
+    quote_book: &QuoteBook,
 ) -> Option<PendingSwap> {
     let trimmed = line.trim();
     if trimmed.is_empty() {
@@ -240,6 +244,10 @@ async fn handle_input(
             println!("  propose <amt> <a2b|b2a> <desired_amt> [--min-rep <score>] - Propose coordinated swap");
             println!("  accept <proposal-id>  - Accept a swap proposal");
             println!("  proposals           - List active proposals");
+            println!("  quote <amt> <a2b|b2a> [--min-rep <score>] - Request a quote from peers");
+            println!("  respond <quote-id> <offered_amt> <price> - Respond to a quote request");
+            println!("  accept-quote <quote-id> [response-id] - Accept best/specific quote");
+            println!("  quotes              - List active quote requests");
             println!("  reputation [peer]   - Show reputation scores");
             println!("  sim on|off|local    - Set execution mode (sim/live/local-anvil)");
             println!("  archive             - Flush log buffer to Filecoin via sidecar");
@@ -739,6 +747,297 @@ async fn handle_input(
                 }
             }
         }
+        "quote" => {
+            if let Some(args) = parts.get(1) {
+                let tokens: Vec<&str> = args.split_whitespace().collect();
+                if tokens.len() < 2 {
+                    println!("Usage: quote <amount> <a2b|b2a> [--min-rep <score>]");
+                    return None;
+                }
+                let amount = tokens[0];
+                let direction = match tokens[1] {
+                    "a2b" => "TKNA -> TKNB",
+                    "b2a" => "TKNB -> TKNA",
+                    other => {
+                        println!("Invalid direction '{other}'. Use a2b or b2a.");
+                        return None;
+                    }
+                };
+
+                let mut min_reputation = None;
+                let mut i = 2;
+                while i < tokens.len() {
+                    if tokens[i] == "--min-rep" {
+                        if let Some(val) = tokens.get(i + 1) {
+                            min_reputation = val.parse().ok();
+                        }
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+
+                let peer_id_str = swarm.local_peer_id().to_string();
+                let quote_id = quotes::generate_quote_id(&peer_id_str);
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+
+                let request = quotes::QuoteRequest {
+                    quote_id: quote_id.clone(),
+                    requester: peer_id_str,
+                    direction: direction.to_string(),
+                    amount: amount.to_string(),
+                    min_reputation,
+                    expires_at: now + quotes::QUOTE_EXPIRY_SECS,
+                };
+
+                quote_book.add_request(request);
+
+                let msg = AgentMessage::QuoteRequest {
+                    quote_id: quote_id.clone(),
+                    requester: swarm.local_peer_id().to_string(),
+                    direction: direction.to_string(),
+                    amount: amount.to_string(),
+                    min_reputation,
+                    expires_at: now + quotes::QUOTE_EXPIRY_SECS,
+                };
+                publish_message(swarm, topic, &msg);
+
+                let rep_str = min_reputation
+                    .map(|r| format!(" (min-rep: {r:.2})"))
+                    .unwrap_or_default();
+                println!("[QUOTE] {quote_id}: Requesting quote for {amount} {direction}{rep_str}");
+            } else {
+                println!("Usage: quote <amount> <a2b|b2a> [--min-rep <score>]");
+            }
+        }
+        "respond" => {
+            if let Some(args) = parts.get(1) {
+                let tokens: Vec<&str> = args.split_whitespace().collect();
+                if tokens.len() < 3 {
+                    println!("Usage: respond <quote-id> <offered_amount> <price>");
+                    return None;
+                }
+                let quote_id = tokens[0];
+                let offered_amount = tokens[1];
+                let price = tokens[2];
+
+                match quote_book.get(quote_id) {
+                    Some((request, status, _)) => {
+                        if request.is_expired() {
+                            println!("[RESPOND] Quote {quote_id} has expired.");
+                            return None;
+                        }
+                        if matches!(status, quotes::QuoteStatus::Accepted { .. } | quotes::QuoteStatus::Expired) {
+                            println!("[RESPOND] Quote {quote_id} is no longer open.");
+                            return None;
+                        }
+
+                        // Reputation gate: check our score meets request's min_reputation
+                        let my_peer_id = swarm.local_peer_id().to_string();
+                        if let Some(min_rep) = request.min_reputation {
+                            let my_score = reputation_store.score(&my_peer_id);
+                            if my_score < min_rep {
+                                println!(
+                                    "[RESPOND] Cannot respond: your reputation {:.2} < required {:.2}",
+                                    my_score, min_rep
+                                );
+                                return None;
+                            }
+                        }
+
+                        let response_id = quotes::generate_response_id(&my_peer_id);
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs();
+
+                        let response = quotes::QuoteResponse {
+                            response_id: response_id.clone(),
+                            quote_id: quote_id.to_string(),
+                            responder: my_peer_id,
+                            offered_amount: offered_amount.to_string(),
+                            price: price.to_string(),
+                            expires_at: now + quotes::QUOTE_EXPIRY_SECS,
+                        };
+
+                        quote_book.add_response(response);
+
+                        let msg = AgentMessage::QuoteResponse {
+                            response_id: response_id.clone(),
+                            quote_id: quote_id.to_string(),
+                            responder: swarm.local_peer_id().to_string(),
+                            offered_amount: offered_amount.to_string(),
+                            price: price.to_string(),
+                            expires_at: now + quotes::QUOTE_EXPIRY_SECS,
+                        };
+                        publish_message(swarm, topic, &msg);
+                        println!("[RESPOND] Sent quote {response_id} for {quote_id}: {offered_amount} at price {price}");
+                    }
+                    None => {
+                        println!("[RESPOND] Quote {quote_id} not found.");
+                    }
+                }
+            } else {
+                println!("Usage: respond <quote-id> <offered_amount> <price>");
+            }
+        }
+        "accept-quote" => {
+            if let Some(args) = parts.get(1) {
+                let tokens: Vec<&str> = args.split_whitespace().collect();
+                if tokens.is_empty() {
+                    println!("Usage: accept-quote <quote-id> [response-id]");
+                    return None;
+                }
+                let quote_id = tokens[0];
+                let specific_response_id = tokens.get(1).map(|s| s.to_string());
+
+                match quote_book.get(quote_id) {
+                    Some((request, status, responses)) => {
+                        if request.is_expired() {
+                            println!("[ACCEPT-QUOTE] Quote {quote_id} has expired.");
+                            return None;
+                        }
+                        if matches!(status, quotes::QuoteStatus::Accepted { .. }) {
+                            println!("[ACCEPT-QUOTE] Quote {quote_id} already accepted.");
+                            return None;
+                        }
+                        if responses.is_empty() {
+                            println!("[ACCEPT-QUOTE] No responses for {quote_id} yet.");
+                            return None;
+                        }
+
+                        // Select specific response or best response
+                        let selected = if let Some(ref rid) = specific_response_id {
+                            responses.iter().find(|r| r.response_id == *rid).cloned()
+                        } else {
+                            quote_book.best_response(quote_id)
+                        };
+
+                        let response = match selected {
+                            Some(r) => r,
+                            None => {
+                                println!("[ACCEPT-QUOTE] Response not found or all expired.");
+                                return None;
+                            }
+                        };
+
+                        if response.is_expired() {
+                            println!("[ACCEPT-QUOTE] Selected response has expired.");
+                            return None;
+                        }
+
+                        // Reputation gate: check responder's trust level
+                        let responder_trust = reputation_store.trust_level(&response.responder);
+                        if matches!(responder_trust, reputation::TrustLevel::Unknown) {
+                            println!("[ACCEPT-QUOTE] Responder is untrusted.");
+                            return None;
+                        }
+
+                        quote_book.update_status(
+                            quote_id,
+                            quotes::QuoteStatus::Accepted {
+                                response_id: response.response_id.clone(),
+                                responder: response.responder.clone(),
+                            },
+                        );
+
+                        let msg = AgentMessage::QuoteAccept {
+                            quote_id: quote_id.to_string(),
+                            response_id: response.response_id.clone(),
+                            acceptor: swarm.local_peer_id().to_string(),
+                        };
+                        publish_message(swarm, topic, &msg);
+
+                        let responder_short =
+                            &response.responder[..8.min(response.responder.len())];
+                        println!(
+                            "[ACCEPT-QUOTE] Accepted {} from {responder_short}: {} at price {}",
+                            response.response_id, response.offered_amount, response.price
+                        );
+
+                        // Broadcast intent and trigger swap execution
+                        let zero_for_one = request.direction.contains("TKNA -> TKNB");
+                        let intent_msg = AgentMessage::SwapIntent {
+                            agent: swarm.local_peer_id().to_string(),
+                            direction: request.direction.clone(),
+                            amount: request.amount.clone(),
+                            min_price: None,
+                            max_price: None,
+                            timestamp: std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs(),
+                        };
+                        publish_message(swarm, intent_topic, &intent_msg);
+                        reputation_store.record_intent(&swarm.local_peer_id().to_string());
+
+                        return Some(PendingSwap {
+                            is_v2: false,
+                            zero_for_one,
+                            amount_str: request.amount.clone(),
+                            direction: request.direction.clone(),
+                            version: "V1".to_string(),
+                            conditions: reputation::SwapConditions::default(),
+                            proposal_id: None,
+                        });
+                    }
+                    None => {
+                        println!("[ACCEPT-QUOTE] Quote {quote_id} not found.");
+                    }
+                }
+            } else {
+                println!("Usage: accept-quote <quote-id> [response-id]");
+            }
+        }
+        "quotes" => {
+            quote_book.cleanup_expired_with_requesters();
+            let active = quote_book.active_quotes();
+            if active.is_empty() {
+                println!("No active quote requests.");
+            } else {
+                println!("Active quote requests ({}):", active.len());
+                for (request, status, responses) in &active {
+                    let status_str = match status {
+                        quotes::QuoteStatus::Open => "open".to_string(),
+                        quotes::QuoteStatus::Responded => {
+                            format!("{} response(s)", responses.len())
+                        }
+                        quotes::QuoteStatus::Accepted {
+                            response_id,
+                            responder,
+                        } => {
+                            format!(
+                                "accepted {} from {}",
+                                response_id,
+                                &responder[..8.min(responder.len())]
+                            )
+                        }
+                        quotes::QuoteStatus::Expired => "expired".to_string(),
+                    };
+                    let requester_short =
+                        &request.requester[..8.min(request.requester.len())];
+                    println!(
+                        "  {} | {} {} | by {} | {}",
+                        request.quote_id,
+                        request.amount,
+                        request.direction,
+                        requester_short,
+                        status_str
+                    );
+                    for resp in responses {
+                        let resp_short =
+                            &resp.responder[..8.min(resp.responder.len())];
+                        println!(
+                            "    -> {} | {} offers {} at price {}",
+                            resp.response_id, resp_short, resp.offered_amount, resp.price
+                        );
+                    }
+                }
+            }
+        }
         _ => {
             let msg = AgentMessage::Chat {
                 content: trimmed.to_string(),
@@ -884,6 +1183,7 @@ fn handle_swarm_event(
     archiver: &LogArchiver,
     reputation_store: &ReputationStore,
     coordination_book: &CoordinationBook,
+    quote_book: &QuoteBook,
 ) {
     match event {
         SwarmEvent::Behaviour(AgentBehaviourEvent::Mdns(mdns::Event::Discovered(list))) => {
@@ -1140,6 +1440,119 @@ fn handle_swarm_event(
                             }
                         }
                     }
+                    AgentMessage::QuoteRequest {
+                        quote_id,
+                        requester,
+                        direction,
+                        amount,
+                        min_reputation,
+                        expires_at,
+                    } => {
+                        if requester != swarm.local_peer_id().to_string() {
+                            // Gate: ignore requests from unknown peers
+                            let requester_trust = reputation_store.trust_level(&requester);
+                            if matches!(requester_trust, reputation::TrustLevel::Unknown) {
+                                println!(
+                                    "[QUOTE-REQ] Ignored from untrusted peer {}",
+                                    &requester[..8.min(requester.len())]
+                                );
+                                return;
+                            }
+                            let rep_str = min_reputation
+                                .map(|r| format!(" (min-rep: {r:.2})"))
+                                .unwrap_or_default();
+                            let requester_short = &requester[..8.min(requester.len())];
+                            println!(
+                                "[QUOTE-REQ] {quote_id}: {requester_short} wants {amount} {direction}{rep_str}"
+                            );
+                            println!("  Type 'respond {quote_id} <offered_amount> <price>' to respond.");
+
+                            let request = quotes::QuoteRequest {
+                                quote_id,
+                                requester,
+                                direction,
+                                amount,
+                                min_reputation,
+                                expires_at,
+                            };
+                            quote_book.add_request(request);
+                        }
+                    }
+                    AgentMessage::QuoteResponse {
+                        response_id,
+                        quote_id,
+                        responder,
+                        offered_amount,
+                        price,
+                        expires_at,
+                    } => {
+                        if responder != swarm.local_peer_id().to_string() {
+                            // Gate: ignore responses from unknown peers
+                            let responder_trust = reputation_store.trust_level(&responder);
+                            if matches!(responder_trust, reputation::TrustLevel::Unknown) {
+                                println!(
+                                    "[QUOTE-RESP] Ignored from untrusted peer {}",
+                                    &responder[..8.min(responder.len())]
+                                );
+                                return;
+                            }
+
+                            let response = quotes::QuoteResponse {
+                                response_id: response_id.clone(),
+                                quote_id: quote_id.clone(),
+                                responder: responder.clone(),
+                                offered_amount: offered_amount.clone(),
+                                price: price.clone(),
+                                expires_at,
+                            };
+                            quote_book.add_response(response);
+
+                            let responder_short = &responder[..8.min(responder.len())];
+                            println!(
+                                "[QUOTE-RESP] {response_id} for {quote_id}: {responder_short} offers {offered_amount} at price {price}"
+                            );
+
+                            // Hint the requester to accept
+                            if let Some((req, _, _)) = quote_book.get(&quote_id) {
+                                if req.requester == swarm.local_peer_id().to_string() {
+                                    println!("  Type 'accept-quote {quote_id}' to accept best quote, or 'accept-quote {quote_id} {response_id}' for this one.");
+                                }
+                            }
+                        }
+                    }
+                    AgentMessage::QuoteAccept {
+                        quote_id,
+                        response_id,
+                        acceptor,
+                    } => {
+                        if acceptor != swarm.local_peer_id().to_string() {
+                            let acceptor_short = &acceptor[..8.min(acceptor.len())];
+                            println!(
+                                "[QUOTE-ACCEPTED] {acceptor_short} accepted response {response_id} for {quote_id}"
+                            );
+
+                            // Check if our response was accepted
+                            if let Some((_, _, responses)) = quote_book.get(&quote_id) {
+                                for resp in &responses {
+                                    if resp.response_id == response_id
+                                        && resp.responder == swarm.local_peer_id().to_string()
+                                    {
+                                        println!(
+                                            "[COORD] Your quote was accepted! Execute your side of the swap."
+                                        );
+                                    }
+                                }
+                            }
+
+                            quote_book.update_status(
+                                &quote_id,
+                                quotes::QuoteStatus::Accepted {
+                                    response_id,
+                                    responder: acceptor,
+                                },
+                            );
+                        }
+                    }
                 }
             } else {
                 // Invalid/malformed message — reject for P4 scoring
@@ -1185,11 +1598,18 @@ fn refresh_peer_scores(
     swarm: &mut libp2p::Swarm<network::AgentBehaviour>,
     reputation_store: &ReputationStore,
     coordination_book: &CoordinationBook,
+    quote_book: &QuoteBook,
 ) {
     // Penalize initiators of newly expired proposals
     let expired_initiators = coordination_book.cleanup_expired_with_initiators();
     for initiator in &expired_initiators {
         reputation_store.record_expired_proposal(initiator);
+    }
+
+    // Penalize requesters of newly expired quotes
+    let expired_requesters = quote_book.cleanup_expired_with_requesters();
+    for requester in &expired_requesters {
+        reputation_store.record_expired_proposal(requester);
     }
 
     // Refresh P5 scores for all peers (decay-aware via composite_score())
