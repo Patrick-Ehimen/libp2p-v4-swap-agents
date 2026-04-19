@@ -99,6 +99,7 @@ fn swap_intent_roundtrip() {
         amount: "10".into(),
         min_price: Some("0.95".into()),
         max_price: Some("1.05".into()),
+        max_slippage_bps: None,
         timestamp: 1700000000,
     };
     let json = serde_json::to_string(&msg).unwrap();
@@ -111,6 +112,7 @@ fn swap_intent_roundtrip() {
             min_price,
             max_price,
             timestamp,
+            ..
         } => {
             assert_eq!(agent, "peer1");
             assert_eq!(direction, "TKNA -> TKNB");
@@ -131,6 +133,7 @@ fn swap_intent_optional_prices_none() {
         amount: "5".into(),
         min_price: None,
         max_price: None,
+        max_slippage_bps: None,
         timestamp: 1700000001,
     };
     let json = serde_json::to_string(&msg).unwrap();
@@ -156,6 +159,7 @@ fn swap_intent_serialized_json_has_type_tag() {
         amount: "1".into(),
         min_price: None,
         max_price: None,
+        max_slippage_bps: None,
         timestamp: 0,
     })
     .unwrap();
@@ -364,4 +368,103 @@ fn thresholds_are_ordered() {
     let (_, thresholds) = build_peer_score_params();
     assert!(thresholds.gossip_threshold > thresholds.publish_threshold);
     assert!(thresholds.publish_threshold > thresholds.graylist_threshold);
+}
+
+#[test]
+fn swap_intent_with_slippage_roundtrip() {
+    let msg = AgentMessage::SwapIntent {
+        agent: "peer1".into(),
+        direction: "TKNA -> TKNB".into(),
+        amount: "100".into(),
+        min_price: None,
+        max_price: None,
+        max_slippage_bps: Some(50),
+        timestamp: 1_000_000,
+    };
+    let json = serde_json::to_string(&msg).unwrap();
+    let decoded: AgentMessage = serde_json::from_str(&json).unwrap();
+    match decoded {
+        AgentMessage::SwapIntent {
+            max_slippage_bps,
+            timestamp,
+            ..
+        } => {
+            assert_eq!(max_slippage_bps, Some(50));
+            assert_eq!(timestamp, 1_000_000);
+        }
+        _ => panic!("wrong variant"),
+    }
+}
+
+#[test]
+fn swap_intent_without_slippage_deserializes_as_none() {
+    // Old-format SwapIntent (no max_slippage_bps field) must still deserialize cleanly.
+    let json = r#"{"type":"SwapIntent","agent":"p1","direction":"TKNA -> TKNB","amount":"10","timestamp":0}"#;
+    let decoded: AgentMessage = serde_json::from_str(json).unwrap();
+    match decoded {
+        AgentMessage::SwapIntent {
+            max_slippage_bps, ..
+        } => assert_eq!(max_slippage_bps, None),
+        _ => panic!("wrong variant"),
+    }
+}
+
+#[test]
+fn mev_alert_roundtrip() {
+    let msg = AgentMessage::MevAlert {
+        reporter: "peer1".into(),
+        direction: "TKNA -> TKNB".into(),
+        amount_in: "100".into(),
+        amount_out_min: "99500000000000000000".into(),
+        actual_out: "97000000000000000000".into(),
+        realized_slippage_bps: 301,
+        sandwich_detected: true,
+        timestamp: 9_999,
+    };
+    let json = serde_json::to_string(&msg).unwrap();
+    let decoded: AgentMessage = serde_json::from_str(&json).unwrap();
+    match decoded {
+        AgentMessage::MevAlert {
+            reporter,
+            direction,
+            realized_slippage_bps,
+            sandwich_detected,
+            timestamp,
+            ..
+        } => {
+            assert_eq!(reporter, "peer1");
+            assert_eq!(direction, "TKNA -> TKNB");
+            assert_eq!(realized_slippage_bps, 301);
+            assert!(sandwich_detected);
+            assert_eq!(timestamp, 9_999);
+        }
+        _ => panic!("wrong variant"),
+    }
+}
+
+#[test]
+fn mev_alert_sandwich_false_roundtrip() {
+    let msg = AgentMessage::MevAlert {
+        reporter: "peer2".into(),
+        direction: "TKNB -> TKNA".into(),
+        amount_in: "50".into(),
+        amount_out_min: "49750000000000000000".into(),
+        actual_out: "49800000000000000000".into(),
+        realized_slippage_bps: 40,
+        sandwich_detected: false,
+        timestamp: 1,
+    };
+    let json = serde_json::to_string(&msg).unwrap();
+    let decoded: AgentMessage = serde_json::from_str(&json).unwrap();
+    match decoded {
+        AgentMessage::MevAlert {
+            sandwich_detected,
+            realized_slippage_bps,
+            ..
+        } => {
+            assert!(!sandwich_detected);
+            assert_eq!(realized_slippage_bps, 40);
+        }
+        _ => panic!("wrong variant"),
+    }
 }

@@ -90,7 +90,17 @@ impl SwapClient {
         }
     }
 
-    pub async fn execute_swap(&self, amount: U256, zero_for_one: bool) -> Result<String> {
+    /// Execute a V1 swap with slippage protection.
+    ///
+    /// `amount_out_min` is enforced on-chain — the router reverts if actual output falls below
+    /// this value. Returns `(tx_hash, actual_out)` where `actual_out` is measured via
+    /// token balance diff, enabling post-execution MEV analysis.
+    pub async fn execute_swap(
+        &self,
+        amount: U256,
+        zero_for_one: bool,
+        amount_out_min: U256,
+    ) -> Result<(String, U256)> {
         let signer: PrivateKeySigner = self.private_key.parse()?;
         let receiver = signer.address();
         let wallet = EthereumWallet::from(signer);
@@ -110,7 +120,12 @@ impl SwapClient {
             approve_receipt.transaction_hash, approve_receipt.transaction_hash
         );
 
-        // Execute swap
+        // Snapshot output token balance before swap to measure actual output
+        let token_out_addr = if zero_for_one { TKNB } else { TKNA };
+        let token_out = IERC20::new(token_out_addr, &provider);
+        let balance_before = token_out.balanceOf(receiver).call().await?._0;
+
+        // Execute swap with on-chain slippage enforcement
         let router = ISwapRouter::new(SWAP_ROUTER, &provider);
         let deadline = U256::from(
             std::time::SystemTime::now()
@@ -121,7 +136,7 @@ impl SwapClient {
 
         let swap_call = router.swapExactTokensForTokens(
             amount,
-            U256::ZERO,
+            amount_out_min,
             zero_for_one,
             Self::pool_key(),
             vec![].into(),
@@ -133,7 +148,11 @@ impl SwapClient {
         let tx_hash = format!("{:#x}", receipt.transaction_hash);
         println!("  Swap executed: tx {tx_hash}");
 
-        Ok(tx_hash)
+        // Measure actual output via balance diff
+        let balance_after = token_out.balanceOf(receiver).call().await?._0;
+        let actual_out = balance_after.saturating_sub(balance_before);
+
+        Ok((tx_hash, actual_out))
     }
 
     /// V2 pool key: same tokens, but uses DYNAMIC_FEE_FLAG so the hook can override
@@ -148,10 +167,17 @@ impl SwapClient {
         }
     }
 
-    /// Execute a swap on the V2 pool.
+    /// Execute a swap on the V2 pool with slippage protection.
+    ///
     /// Unlike V1, this ABI-encodes the agent's EOA address into hookData so the
     /// AgentCounterV2 hook can track the real agent (not the router address).
-    pub async fn execute_swap_v2(&self, amount: U256, zero_for_one: bool) -> Result<String> {
+    /// Returns `(tx_hash, actual_out)` for post-execution MEV analysis.
+    pub async fn execute_swap_v2(
+        &self,
+        amount: U256,
+        zero_for_one: bool,
+        amount_out_min: U256,
+    ) -> Result<(String, U256)> {
         let signer: PrivateKeySigner = self.private_key.parse()?;
         let receiver = signer.address();
         let wallet = EthereumWallet::from(signer);
@@ -171,6 +197,11 @@ impl SwapClient {
             approve_receipt.transaction_hash, approve_receipt.transaction_hash
         );
 
+        // Snapshot output token balance before swap
+        let token_out_addr = if zero_for_one { TKNB } else { TKNA };
+        let token_out = IERC20::new(token_out_addr, &provider);
+        let balance_before = token_out.balanceOf(receiver).call().await?._0;
+
         // Encode agent EOA as hookData for V2 agent tracking
         let hook_data: Bytes = receiver.abi_encode().into();
 
@@ -184,7 +215,7 @@ impl SwapClient {
 
         let swap_call = router.swapExactTokensForTokens(
             amount,
-            U256::ZERO,
+            amount_out_min,
             zero_for_one,
             Self::pool_key_v2(),
             hook_data,
@@ -196,7 +227,11 @@ impl SwapClient {
         let tx_hash = format!("{:#x}", receipt.transaction_hash);
         println!("  Swap executed (V2): tx {tx_hash}");
 
-        Ok(tx_hash)
+        // Measure actual output via balance diff
+        let balance_after = token_out.balanceOf(receiver).call().await?._0;
+        let actual_out = balance_after.saturating_sub(balance_before);
+
+        Ok((tx_hash, actual_out))
     }
 
     /// Query V2 hook for swap counts and the agent's current fee tier.

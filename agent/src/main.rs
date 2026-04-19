@@ -2,6 +2,7 @@ mod archival;
 mod cli;
 mod coordination;
 mod identity;
+mod mev;
 mod network;
 mod quotes;
 mod reputation;
@@ -27,6 +28,7 @@ use archival::{LogArchiver, LogEntry};
 use cli::Cli;
 use coordination::CoordinationBook;
 use identity::{IdentityBinding, PeerRegistry};
+use mev::MevStore;
 use network::{AgentBehaviourEvent, AgentMessage, INTENT_TOPIC, TOPIC};
 use quotes::QuoteBook;
 use reputation::ReputationStore;
@@ -115,6 +117,7 @@ async fn main() -> Result<()> {
     reputation_store.set_identity_verified(&peer_id_str, true);
     let coordination_book = CoordinationBook::new();
     let quote_book = QuoteBook::new();
+    let mev_store = MevStore::new();
 
     // Dial a remote peer if provided as CLI argument
     if let Some(addr) = cli.dial {
@@ -143,7 +146,7 @@ async fn main() -> Result<()> {
             loop {
                 tokio::select! {
                     event = swarm.select_next_some() => {
-                        handle_swarm_event(event, &mut swarm, &topic, &attestation_msg, &mut peer_registry, &archiver, &reputation_store, &coordination_book, &quote_book);
+                        handle_swarm_event(event, &mut swarm, &topic, &attestation_msg, &mut peer_registry, &archiver, &reputation_store, &coordination_book, &quote_book, &mev_store);
                     }
                     _ = &mut flush_deadline => break,
                 }
@@ -173,6 +176,7 @@ async fn main() -> Result<()> {
                 &archiver,
                 &coordination_book,
                 &reputation_store,
+                &mev_store,
             )
             .await;
             continue;
@@ -181,11 +185,11 @@ async fn main() -> Result<()> {
         tokio::select! {
             line = stdin.next_line() => {
                 if let Ok(Some(line)) = line {
-                    pending_swap = handle_input(&line, &topic, &intent_topic, &mut swarm, &swap_client, &peer_registry, &sim_mode, &archiver, &reputation_store, &coordination_book, &quote_book).await;
+                    pending_swap = handle_input(&line, &topic, &intent_topic, &mut swarm, &swap_client, &peer_registry, &sim_mode, &archiver, &reputation_store, &coordination_book, &quote_book, &mev_store).await;
                 }
             }
             event = swarm.select_next_some() => {
-                handle_swarm_event(event, &mut swarm, &topic, &attestation_msg, &mut peer_registry, &archiver, &reputation_store, &coordination_book, &quote_book);
+                handle_swarm_event(event, &mut swarm, &topic, &attestation_msg, &mut peer_registry, &archiver, &reputation_store, &coordination_book, &quote_book, &mev_store);
             }
             _ = score_refresh_interval.tick() => {
                 refresh_peer_scores(&mut swarm, &reputation_store, &coordination_book, &quote_book);
@@ -204,6 +208,8 @@ struct PendingSwap {
     conditions: reputation::SwapConditions,
     /// If this swap is part of a coordinated proposal.
     proposal_id: Option<String>,
+    /// Max acceptable slippage in basis points for on-chain enforcement.
+    max_slippage_bps: u64,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -219,6 +225,7 @@ async fn handle_input(
     reputation_store: &ReputationStore,
     coordination_book: &CoordinationBook,
     quote_book: &QuoteBook,
+    mev_store: &MevStore,
 ) -> Option<PendingSwap> {
     let trimmed = line.trim();
     if trimmed.is_empty() {
@@ -238,6 +245,7 @@ async fn handle_input(
             println!("    --min-rep <score>   Minimum reputation score (0.0-1.0)");
             println!("    --min-price <val>   Price floor");
             println!("    --max-price <val>   Price ceiling");
+            println!("    --slippage <bps>    Max slippage in basis points (overrides mev-config)");
             println!("  status              - Query V1 on-chain swap counts");
             println!("  status-v2           - Query V2 swap counts + your fee tier");
             println!("  intent <amount> <a2b|b2a> [min] [max] - Broadcast swap intent");
@@ -255,6 +263,8 @@ async fn handle_input(
             println!("  log-status          - Show log buffer count and sidecar URL");
             println!("  who                 - Show your PeerId and EOA");
             println!("  peers               - List all verified peer identities + trust");
+            println!("  mev                 - Show MEV stats (own slippage + peer alerts)");
+            println!("  mev-config <bps>    - Set max slippage tolerance in basis points");
             println!("  help                - Show this message");
             println!("  <text>              - Send chat message to peers");
         }
@@ -289,12 +299,14 @@ async fn handle_input(
 
             // Broadcast intent, then defer execution to the main loop
             // so the swarm can flush the intent to peers first
+            let slippage_bps = mev_store.max_slippage_bps();
             let intent_msg = AgentMessage::SwapIntent {
                 agent: swarm.local_peer_id().to_string(),
                 direction: direction.to_string(),
                 amount: amount_str.to_string(),
                 min_price: None,
                 max_price: None,
+                max_slippage_bps: Some(slippage_bps),
                 timestamp: std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
@@ -302,7 +314,7 @@ async fn handle_input(
             };
             publish_message(swarm, intent_topic, &intent_msg);
             reputation_store.record_intent(&swarm.local_peer_id().to_string());
-            println!("[INTENT] Broadcast: {amount_str} {direction}");
+            println!("[INTENT] Broadcast: {amount_str} {direction} (slippage: {slippage_bps} bps)");
 
             return Some(PendingSwap {
                 is_v2,
@@ -312,6 +324,7 @@ async fn handle_input(
                 version: version.to_string(),
                 conditions: reputation::SwapConditions::default(),
                 proposal_id: None,
+                max_slippage_bps: slippage_bps,
             });
         }
         "status" => match swap_client.get_swap_counts().await {
@@ -352,6 +365,7 @@ async fn handle_input(
                         amount: amount.to_string(),
                         min_price: min_price.clone(),
                         max_price: max_price.clone(),
+                        max_slippage_bps: Some(mev_store.max_slippage_bps()),
                         timestamp: std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap_or_default()
@@ -488,6 +502,7 @@ async fn handle_input(
                 let zero_for_one = tokens[1] == "a2b";
 
                 let mut conditions = reputation::SwapConditions::default();
+                let mut slippage_override: Option<u64> = None;
                 let mut i = 2;
                 while i < tokens.len() {
                     match tokens[i] {
@@ -507,18 +522,24 @@ async fn handle_input(
                             conditions.max_price = tokens.get(i + 1).map(|s| s.to_string());
                             i += 2;
                         }
+                        "--slippage" => {
+                            slippage_override = tokens.get(i + 1).and_then(|s| s.parse().ok());
+                            i += 2;
+                        }
                         _ => {
                             i += 1;
                         }
                     }
                 }
 
+                let slippage_bps = slippage_override.unwrap_or_else(|| mev_store.max_slippage_bps());
                 let intent_msg = AgentMessage::SwapIntent {
                     agent: swarm.local_peer_id().to_string(),
                     direction: direction.to_string(),
                     amount: amount.to_string(),
                     min_price: conditions.min_price.clone(),
                     max_price: conditions.max_price.clone(),
+                    max_slippage_bps: Some(slippage_bps),
                     timestamp: std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
@@ -537,11 +558,8 @@ async fn handle_input(
                 if let Some(ref p) = conditions.max_price {
                     cond_parts.push(format!("max-price: {p}"));
                 }
-                let cond_str = if cond_parts.is_empty() {
-                    String::new()
-                } else {
-                    format!(" ({})", cond_parts.join(", "))
-                };
+                cond_parts.push(format!("slippage: {slippage_bps} bps"));
+                let cond_str = format!(" ({})", cond_parts.join(", "));
                 println!("[CSWAP] Broadcast conditional intent: {amount} {direction}{cond_str}");
 
                 return Some(PendingSwap {
@@ -552,6 +570,7 @@ async fn handle_input(
                     version: "V1".to_string(),
                     conditions,
                     proposal_id: None,
+                    max_slippage_bps: slippage_bps,
                 });
             } else {
                 println!("Usage: cswap <amount> <a2b|b2a> [--min-rep <score>] [--min-price <val>] [--max-price <val>]");
@@ -674,12 +693,14 @@ async fn handle_input(
 
                         // Execute the desired counter-swap
                         let zero_for_one = proposal.desired_direction.contains("TKNA -> TKNB");
+                        let slippage_bps = mev_store.max_slippage_bps();
                         let intent_msg = AgentMessage::SwapIntent {
                             agent: swarm.local_peer_id().to_string(),
                             direction: proposal.desired_direction.clone(),
                             amount: proposal.desired_amount.clone(),
                             min_price: None,
                             max_price: None,
+                            max_slippage_bps: Some(slippage_bps),
                             timestamp: std::time::SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)
                                 .unwrap_or_default()
@@ -699,6 +720,7 @@ async fn handle_input(
                             version: "V1".to_string(),
                             conditions: reputation::SwapConditions::default(),
                             proposal_id: Some(proposal.proposal_id.clone()),
+                            max_slippage_bps: slippage_bps,
                         });
                     }
                     Some((_, _)) => {
@@ -960,12 +982,14 @@ async fn handle_input(
 
                         // Broadcast intent and trigger swap execution
                         let zero_for_one = request.direction.contains("TKNA -> TKNB");
+                        let slippage_bps = mev_store.max_slippage_bps();
                         let intent_msg = AgentMessage::SwapIntent {
                             agent: swarm.local_peer_id().to_string(),
                             direction: request.direction.clone(),
                             amount: request.amount.clone(),
                             min_price: None,
                             max_price: None,
+                            max_slippage_bps: Some(slippage_bps),
                             timestamp: std::time::SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)
                                 .unwrap_or_default()
@@ -982,6 +1006,7 @@ async fn handle_input(
                             version: "V1".to_string(),
                             conditions: reputation::SwapConditions::default(),
                             proposal_id: None,
+                            max_slippage_bps: slippage_bps,
                         });
                     }
                     None => {
@@ -1038,6 +1063,48 @@ async fn handle_input(
                 }
             }
         }
+        "mev" => {
+            let summary = mev_store.own_summary();
+            println!("=== MEV Stats ===");
+            println!("Config:    max slippage {} bps ({:.2}%)", mev_store.max_slippage_bps(), mev_store.max_slippage_bps() as f64 / 100.0);
+            println!("Own swaps: {}", summary.total_swaps);
+            if summary.total_swaps > 0 {
+                println!("  Avg slippage:   {} bps", summary.avg_slippage_bps);
+                println!("  Worst slippage: {} bps", summary.worst_slippage_bps);
+                println!("  Sandwiches:     {}", summary.sandwich_count);
+            }
+            let peer_stats = mev_store.peer_stats_all();
+            if !peer_stats.is_empty() {
+                println!("Peer alerts ({}):", peer_stats.len());
+                for (pid, stats) in &peer_stats {
+                    let short = &pid[..8.min(pid.len())];
+                    println!(
+                        "  {}... — {} alerts | avg slippage: {} bps | sandwiches: {}",
+                        short, stats.alerts_received, stats.avg_slippage_bps(), stats.sandwich_count
+                    );
+                }
+            } else {
+                println!("No peer MEV alerts received yet.");
+            }
+        }
+        "mev-config" => {
+            if let Some(arg) = parts.get(1) {
+                match arg.parse::<u64>() {
+                    Ok(bps) => {
+                        mev_store.set_max_slippage_bps(bps);
+                        println!("MEV config updated: max slippage = {bps} bps ({:.2}%)", bps as f64 / 100.0);
+                    }
+                    Err(_) => println!("Usage: mev-config <bps>  (e.g. 50 for 0.5%)"),
+                }
+            } else {
+                println!(
+                    "Current max slippage: {} bps ({:.2}%)",
+                    mev_store.max_slippage_bps(),
+                    mev_store.max_slippage_bps() as f64 / 100.0
+                );
+                println!("Usage: mev-config <bps>  (e.g. 50 for 0.5%)");
+            }
+        }
         _ => {
             let msg = AgentMessage::Chat {
                 content: trimmed.to_string(),
@@ -1075,6 +1142,7 @@ async fn execute_pending_swap(
     archiver: &LogArchiver,
     coordination_book: &CoordinationBook,
     reputation_store: &ReputationStore,
+    mev_store: &MevStore,
 ) {
     if sim_mode.is_active() {
         let peer_id_str = swarm.local_peer_id().to_string();
@@ -1115,8 +1183,8 @@ async fn execute_pending_swap(
         }
     } else {
         println!(
-            "Executing {} swap: {} {}...",
-            swap.version, swap.amount_str, swap.direction
+            "Executing {} swap: {} {} (slippage guard: {} bps)...",
+            swap.version, swap.amount_str, swap.direction, swap.max_slippage_bps
         );
 
         let amount = match swap.amount_str.parse::<u64>() {
@@ -1127,14 +1195,26 @@ async fn execute_pending_swap(
             }
         };
 
+        // Compute on-chain slippage floor from configured tolerance
+        let amount_out_min = mev::compute_amount_out_min(amount, swap.max_slippage_bps);
+        println!(
+            "  amountOutMin: {} ({}e-18)",
+            amount_out_min,
+            swap.amount_str
+        );
+
         let result = if swap.is_v2 {
-            swap_client.execute_swap_v2(amount, swap.zero_for_one).await
+            swap_client
+                .execute_swap_v2(amount, swap.zero_for_one, amount_out_min)
+                .await
         } else {
-            swap_client.execute_swap(amount, swap.zero_for_one).await
+            swap_client
+                .execute_swap(amount, swap.zero_for_one, amount_out_min)
+                .await
         };
 
         match result {
-            Ok(tx_hash) => {
+            Ok((tx_hash, actual_out)) => {
                 let msg = AgentMessage::SwapExecuted {
                     agent: swarm.local_peer_id().to_string(),
                     direction: swap.direction.clone(),
@@ -1152,6 +1232,49 @@ async fn execute_pending_swap(
                 ));
                 if !sim_mode.is_local() {
                     println!("  https://sepolia.etherscan.io/tx/{tx_hash}");
+                }
+
+                // Post-execution MEV analysis
+                let realized_slippage_bps =
+                    mev::compute_realized_slippage_bps(amount, actual_out);
+                let sandwich = mev::is_sandwich(amount, actual_out);
+                let timestamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+
+                if realized_slippage_bps > 0 {
+                    println!(
+                        "  [MEV] Realized slippage: {} bps{}",
+                        realized_slippage_bps,
+                        if sandwich { " ⚠ SANDWICH DETECTED" } else { "" }
+                    );
+                }
+
+                mev_store.record_event(mev::MevEvent {
+                    direction: swap.direction.clone(),
+                    amount_in: amount,
+                    amount_out_min,
+                    actual_out,
+                    realized_slippage_bps,
+                    sandwich_detected: sandwich,
+                    timestamp,
+                });
+
+                // Broadcast MevAlert if sandwich-level slippage detected
+                if sandwich {
+                    let alert = AgentMessage::MevAlert {
+                        reporter: swarm.local_peer_id().to_string(),
+                        direction: swap.direction.clone(),
+                        amount_in: swap.amount_str.clone(),
+                        amount_out_min: amount_out_min.to_string(),
+                        actual_out: actual_out.to_string(),
+                        realized_slippage_bps,
+                        sandwich_detected: true,
+                        timestamp,
+                    };
+                    publish_message(swarm, topic, &alert);
+                    println!("  [MEV] Alert broadcast to peers.");
                 }
 
                 // Publish SwapFill if part of a coordinated swap
@@ -1184,6 +1307,7 @@ fn handle_swarm_event(
     reputation_store: &ReputationStore,
     coordination_book: &CoordinationBook,
     quote_book: &QuoteBook,
+    mev_store: &MevStore,
 ) {
     match event {
         SwarmEvent::Behaviour(AgentBehaviourEvent::Mdns(mdns::Event::Discovered(list))) => {
@@ -1249,6 +1373,7 @@ fn handle_swarm_event(
                         amount,
                         min_price,
                         max_price,
+                        max_slippage_bps,
                         timestamp,
                     } => {
                         let bounds = match (min_price, max_price) {
@@ -1257,12 +1382,15 @@ fn handle_swarm_event(
                             (None, Some(max)) => format!(" max: {max}"),
                             _ => String::new(),
                         };
+                        let slippage_str = max_slippage_bps
+                            .map(|bps| format!(" slippage≤{bps}bps"))
+                            .unwrap_or_default();
                         let secs = timestamp % 60;
                         let mins = (timestamp / 60) % 60;
                         let hours = (timestamp / 3600) % 24;
                         let time_str = format!("{hours:02}:{mins:02}:{secs:02} UTC");
                         println!(
-                            "[INTENT] Agent {agent} intends to swap {amount} ({direction}){bounds} at {time_str}"
+                            "[INTENT] Agent {agent} intends to swap {amount} ({direction}){bounds}{slippage_str} at {time_str}"
                         );
                         reputation_store.record_intent(&agent);
                         if let Ok(pid) = agent.parse::<libp2p::PeerId>() {
@@ -1552,6 +1680,29 @@ fn handle_swarm_event(
                                 },
                             );
                         }
+                    }
+                    AgentMessage::MevAlert {
+                        reporter,
+                        direction,
+                        amount_in,
+                        amount_out_min,
+                        actual_out,
+                        realized_slippage_bps,
+                        sandwich_detected,
+                        timestamp: _,
+                    } => {
+                        let reporter_short = &reporter[..8.min(reporter.len())];
+                        let sandwich_flag = if sandwich_detected { " ⚠ SANDWICH" } else { "" };
+                        println!(
+                            "[MEV-ALERT] {reporter_short} swapped {amount_in} ({direction}): \
+                             out_min={amount_out_min} actual={actual_out} \
+                             slippage={realized_slippage_bps}bps{sandwich_flag}"
+                        );
+                        mev_store.record_peer_alert(
+                            &reporter,
+                            realized_slippage_bps,
+                            sandwich_detected,
+                        );
                     }
                 }
             } else {

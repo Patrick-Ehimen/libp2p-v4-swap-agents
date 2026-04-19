@@ -1,6 +1,7 @@
 mod archival;
 mod coordination;
 mod identity;
+mod mev;
 mod network;
 mod quotes;
 mod reputation;
