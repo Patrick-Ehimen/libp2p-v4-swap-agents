@@ -7,7 +7,7 @@ license = "MIT"
 
 [dependencies]
 # libp2p for P2P networking
-libp2p = { version = "0.54", features = [
+libp2p = { version = "0.56", features = [
     "tokio",
     "gossipsub",
     "mdns",
